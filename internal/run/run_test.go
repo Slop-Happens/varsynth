@@ -162,6 +162,29 @@ func TestExecuteRunsAgentsConcurrently(t *testing.T) {
 	}
 }
 
+func TestExecuteHonorsAgentConcurrencyLimit(t *testing.T) {
+	ctx := context.Background()
+	repoRoot, baseCommit := initRepo(t, ctx)
+	probe := &concurrencyAgent{delay: 25 * time.Millisecond}
+
+	_, err := Execute(ctx, Options{
+		RunID:            "run-serial",
+		RepoRoot:         repoRoot,
+		BaseCommit:       baseCommit,
+		TestCommand:      "true",
+		OutDir:           t.TempDir(),
+		WorktreeRoot:     filepath.Join(t.TempDir(), "worktrees"),
+		AgentConcurrency: 1,
+		Agent:            probe,
+	})
+	if err != nil {
+		t.Fatalf("Execute() returned error: %v", err)
+	}
+	if probe.MaxConcurrent() != 1 {
+		t.Fatalf("max concurrent agent calls = %d, want 1", probe.MaxConcurrent())
+	}
+}
+
 func TestExecuteWaitsForAllConcurrentAgents(t *testing.T) {
 	ctx := context.Background()
 	repoRoot, baseCommit := initRepo(t, ctx)
@@ -210,6 +233,98 @@ func TestExecuteWaitsForAllConcurrentAgents(t *testing.T) {
 
 	if gate.Completed() != len(lens.All()) {
 		t.Fatalf("completed agent calls = %d, want %d", gate.Completed(), len(lens.All()))
+	}
+}
+
+func TestExecuteRetriesTransientAgentFailure(t *testing.T) {
+	ctx := context.Background()
+	repoRoot, baseCommit := initRepo(t, ctx)
+	outDir := t.TempDir()
+	probe := &retryProbeAgent{failuresBeforeSuccess: 1}
+
+	result, err := Execute(ctx, Options{
+		RunID:        "run-retry",
+		RepoRoot:     repoRoot,
+		BaseCommit:   baseCommit,
+		TestCommand:  "true",
+		OutDir:       outDir,
+		WorktreeRoot: filepath.Join(t.TempDir(), "worktrees"),
+		AgentRetries: 1,
+		Agent:        probe,
+	})
+	if err != nil {
+		t.Fatalf("Execute() returned error: %v", err)
+	}
+
+	defensive := readArtifact(t, candidate.Path(outDir, lens.Defensive))
+	if defensive.Status != candidate.StatusValidationPassed {
+		t.Fatalf("defensive Status = %q, want %q", defensive.Status, candidate.StatusValidationPassed)
+	}
+	if defensive.Agent.AttemptCount != 2 {
+		t.Fatalf("defensive AttemptCount = %d, want 2", defensive.Agent.AttemptCount)
+	}
+	if len(defensive.Agent.Attempts) != 2 {
+		t.Fatalf("defensive attempts = %d, want 2", len(defensive.Agent.Attempts))
+	}
+	if defensive.Agent.Attempts[0].Status != "failed" || defensive.Agent.Attempts[1].Status != "success" {
+		t.Fatalf("defensive attempt statuses = %#v", defensive.Agent.Attempts)
+	}
+	if result.RunEventsPath != RunEventsPath(outDir) {
+		t.Fatalf("RunEventsPath = %q, want %q", result.RunEventsPath, RunEventsPath(outDir))
+	}
+	events := readEvents(t, result.RunEventsPath)
+	assertEventType(t, events, eventAgentFailed)
+	assertEventType(t, events, eventAgentFinished)
+}
+
+func TestExecuteRetryExhaustionCreatesFailedCandidateArtifact(t *testing.T) {
+	ctx := context.Background()
+	repoRoot, baseCommit := initRepo(t, ctx)
+	outDir := t.TempDir()
+
+	_, err := Execute(ctx, Options{
+		RunID:        "run-retry-exhausted",
+		RepoRoot:     repoRoot,
+		BaseCommit:   baseCommit,
+		TestCommand:  "true",
+		OutDir:       outDir,
+		WorktreeRoot: filepath.Join(t.TempDir(), "worktrees"),
+		AgentRetries: 2,
+		Agent: scriptedAgent{
+			run: func(input agent.Input) (agent.Result, error) {
+				return agent.Result{
+					Backend:       "scripted",
+					Stdout:        "partial stdout",
+					Stderr:        "partial stderr",
+					FinalResponse: `{"rationale":"partial","root_cause":"unknown","changed_summary":"none","validation_notes":"not run"}`,
+				}, fmt.Errorf("backend unavailable")
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute() returned error: %v", err)
+	}
+
+	defensive := readArtifact(t, candidate.Path(outDir, lens.Defensive))
+	if defensive.Status != candidate.StatusFailed {
+		t.Fatalf("defensive Status = %q, want %q", defensive.Status, candidate.StatusFailed)
+	}
+	if defensive.FailureStage != candidate.FailureAgent {
+		t.Fatalf("defensive FailureStage = %q, want %q", defensive.FailureStage, candidate.FailureAgent)
+	}
+	if defensive.Agent.AttemptCount != 3 {
+		t.Fatalf("defensive AttemptCount = %d, want 3", defensive.Agent.AttemptCount)
+	}
+	if len(defensive.Agent.Attempts) != 3 {
+		t.Fatalf("defensive attempts = %d, want 3", len(defensive.Agent.Attempts))
+	}
+	for _, attempt := range defensive.Agent.Attempts {
+		if attempt.Status != "failed" {
+			t.Fatalf("attempt status = %q, want failed", attempt.Status)
+		}
+		if _, err := os.Stat(attempt.StdoutPath); err != nil {
+			t.Fatalf("attempt stdout artifact missing: %v", err)
+		}
 	}
 }
 
@@ -325,6 +440,124 @@ func TestExecuteIsolatesCandidateAgentFailure(t *testing.T) {
 	}
 	if performanceSummary.ValidationExit == nil || *performanceSummary.ValidationExit != 0 {
 		t.Fatalf("performance report ValidationExit = %v, want 0", performanceSummary.ValidationExit)
+	}
+}
+
+func TestExecuteWritesAgentLogArtifactsAndStructuredFinalResponse(t *testing.T) {
+	ctx := context.Background()
+	repoRoot, baseCommit := initRepo(t, ctx)
+	outDir := t.TempDir()
+
+	_, err := Execute(ctx, Options{
+		RunID:            "run-agent-artifacts",
+		RepoRoot:         repoRoot,
+		BaseCommit:       baseCommit,
+		TestCommand:      "true",
+		OutDir:           outDir,
+		WorktreeRoot:     filepath.Join(t.TempDir(), "worktrees"),
+		MaxAgentLogBytes: 128,
+		Agent: agent.BackendRunner{
+			Backend: fakeBackend{
+				run: func(request agent.Request) (agent.Response, error) {
+					return agent.Response{
+						Stdout:        "token=secret-token-value\nok",
+						Stderr:        "warning",
+						FinalResponse: `{"rationale":"used token=secret-token-value","root_cause":"nil input","changed_summary":"added guard","validation_notes":"validation passed","confidence":0.8}`,
+					}, nil
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute() returned error: %v", err)
+	}
+
+	defensive := readArtifact(t, candidate.Path(outDir, lens.Defensive))
+	if defensive.Rationale != "used token=[REDACTED]" {
+		t.Fatalf("Rationale = %q, want redacted structured rationale", defensive.Rationale)
+	}
+	if defensive.RootCause != "nil input" {
+		t.Fatalf("RootCause = %q, want nil input", defensive.RootCause)
+	}
+	if defensive.ChangedSummary != "added guard" {
+		t.Fatalf("ChangedSummary = %q, want added guard", defensive.ChangedSummary)
+	}
+	if defensive.ValidationNotes != "validation passed" {
+		t.Fatalf("ValidationNotes = %q, want validation passed", defensive.ValidationNotes)
+	}
+	if defensive.Confidence == nil || *defensive.Confidence != 0.8 {
+		t.Fatalf("Confidence = %v, want 0.8", defensive.Confidence)
+	}
+	for _, path := range []string{defensive.Agent.StdoutPath, defensive.Agent.StderrPath, defensive.Agent.FinalResponsePath} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("agent artifact %s missing: %v", path, err)
+		}
+		payload, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read agent artifact %s: %v", path, err)
+		}
+		if strings.Contains(string(payload), "secret-token-value") {
+			t.Fatalf("agent artifact %s leaked secret:\n%s", path, string(payload))
+		}
+	}
+
+	report := readReport(t, reportpkg.Path(outDir))
+	var defensiveSummary reportpkg.CandidateSummary
+	for _, summary := range report.Candidates {
+		if summary.LensID == lens.Defensive {
+			defensiveSummary = summary
+			break
+		}
+	}
+	if defensiveSummary.AgentFinalResponsePath != defensive.Agent.FinalResponsePath {
+		t.Fatalf("report AgentFinalResponsePath = %q, want %q", defensiveSummary.AgentFinalResponsePath, defensive.Agent.FinalResponsePath)
+	}
+	if !defensiveSummary.ChangedSummaryPresent || !defensiveSummary.ValidationNotesPresent {
+		t.Fatalf("report structured fields missing: %#v", defensiveSummary)
+	}
+}
+
+func TestExecuteWritesRunLifecycleEvents(t *testing.T) {
+	ctx := context.Background()
+	repoRoot, baseCommit := initRepo(t, ctx)
+	outDir := t.TempDir()
+
+	result, err := Execute(ctx, Options{
+		RunID:        "run-events",
+		RepoRoot:     repoRoot,
+		BaseCommit:   baseCommit,
+		TestCommand:  "true",
+		OutDir:       outDir,
+		WorktreeRoot: filepath.Join(t.TempDir(), "worktrees"),
+	})
+	if err != nil {
+		t.Fatalf("Execute() returned error: %v", err)
+	}
+
+	events := readEvents(t, result.RunEventsPath)
+	for _, eventType := range []string{
+		eventPromptWritten,
+		eventAgentStarted,
+		eventAgentFinished,
+		eventDiffCollected,
+		eventValidationStarted,
+		eventValidationFinished,
+		eventCandidateWritten,
+	} {
+		assertEventType(t, events, eventType)
+	}
+	for idx, event := range events {
+		if event.Sequence != idx+1 {
+			t.Fatalf("event[%d] sequence = %d, want %d", idx, event.Sequence, idx+1)
+		}
+		if event.RunID != "run-events" {
+			t.Fatalf("event[%d] RunID = %q, want run-events", idx, event.RunID)
+		}
+	}
+
+	report := readReport(t, result.ReportPath)
+	if report.RunEventsPath != result.RunEventsPath {
+		t.Fatalf("report RunEventsPath = %q, want %q", report.RunEventsPath, result.RunEventsPath)
 	}
 }
 
@@ -524,6 +757,41 @@ func (probe *concurrencyAgent) MaxConcurrent() int {
 	return probe.max
 }
 
+type retryProbeAgent struct {
+	failuresBeforeSuccess int
+	mu                    sync.Mutex
+	calls                 map[lens.ID]int
+}
+
+func (probe *retryProbeAgent) Run(ctx context.Context, input agent.Input) (agent.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return agent.Result{}, err
+	}
+
+	probe.mu.Lock()
+	if probe.calls == nil {
+		probe.calls = map[lens.ID]int{}
+	}
+	probe.calls[input.Lens.ID]++
+	call := probe.calls[input.Lens.ID]
+	probe.mu.Unlock()
+
+	result := agent.Result{
+		Rationale:       "retry probe rationale",
+		RootCause:       "retry probe root cause",
+		ChangedSummary:  "retry probe changed summary",
+		ValidationNotes: "retry probe validation notes",
+		Backend:         "retry-probe",
+		Stdout:          fmt.Sprintf("attempt %d stdout", call),
+		Stderr:          fmt.Sprintf("attempt %d stderr", call),
+		FinalResponse:   fmt.Sprintf(`{"rationale":"retry probe rationale","root_cause":"retry probe root cause","changed_summary":"attempt %d","validation_notes":"validation"}`, call),
+	}
+	if call <= probe.failuresBeforeSuccess {
+		return result, fmt.Errorf("transient failure %d", call)
+	}
+	return result, nil
+}
+
 type executeResult struct {
 	result Result
 	err    error
@@ -648,6 +916,39 @@ func readReport(t *testing.T, path string) reportpkg.Summary {
 		t.Fatalf("Unmarshal(%s) returned error: %v", path, err)
 	}
 	return summary
+}
+
+func readEvents(t *testing.T, path string) []Event {
+	t.Helper()
+
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s) returned error: %v", path, err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(payload)), "\n")
+	events := make([]Event, 0, len(lines))
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var event Event
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("Unmarshal event %q returned error: %v", line, err)
+		}
+		events = append(events, event)
+	}
+	return events
+}
+
+func assertEventType(t *testing.T, events []Event, eventType string) {
+	t.Helper()
+
+	for _, event := range events {
+		if event.Type == eventType {
+			return
+		}
+	}
+	t.Fatalf("events missing %q: %#v", eventType, events)
 }
 
 func promptPath(outDir string, id lens.ID) string {

@@ -72,6 +72,7 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		countValidationStatus(runResult.Candidates, candidate.ValidationNotRun),
 	)
 	fmt.Fprintf(stdout, "Report: %s\n", runResult.ReportPath)
+	fmt.Fprintf(stdout, "Run events: %s\n", runResult.RunEventsPath)
 	if cfg.PreserveWorktrees {
 		fmt.Fprintf(stdout, "Worktrees: preserved at %s\n", runResult.WorktreeRoot)
 	} else {
@@ -93,6 +94,9 @@ func runOptionsFromBundle(cfg config.Config, bundle ctxbundle.Bundle) runpkg.Opt
 		OutDir:            cfg.OutDir,
 		WorktreeRoot:      filepath.Join(cfg.OutDir, "worktrees"),
 		PreserveWorktrees: cfg.PreserveWorktrees,
+		AgentConcurrency:  cfg.AgentConcurrency,
+		AgentRetries:      cfg.AgentRetries,
+		AgentRetryDelay:   cfg.AgentRetryDelay,
 		PromptContext:     promptContextFromBundle(bundle),
 		Agent:             agentRunnerFromConfig(cfg),
 	}

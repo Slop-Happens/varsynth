@@ -18,6 +18,14 @@ import (
 
 const DefaultMaxLogBytes = 64 * 1024
 
+type FinalResponse struct {
+	Rationale       string   `json:"rationale"`
+	RootCause       string   `json:"root_cause"`
+	ChangedSummary  string   `json:"changed_summary"`
+	ValidationNotes string   `json:"validation_notes"`
+	Confidence      *float64 `json:"confidence,omitempty"`
+}
+
 type Input struct {
 	RunID        string
 	Lens         lens.Definition
@@ -28,11 +36,15 @@ type Input struct {
 }
 
 type Result struct {
-	Rationale string `json:"rationale"`
-	RootCause string `json:"root_cause"`
-	Backend   string `json:"backend,omitempty"`
-	Stdout    string `json:"stdout,omitempty"`
-	Stderr    string `json:"stderr,omitempty"`
+	Rationale       string   `json:"rationale"`
+	RootCause       string   `json:"root_cause"`
+	ChangedSummary  string   `json:"changed_summary,omitempty"`
+	ValidationNotes string   `json:"validation_notes,omitempty"`
+	Confidence      *float64 `json:"confidence,omitempty"`
+	Backend         string   `json:"backend,omitempty"`
+	Stdout          string   `json:"stdout,omitempty"`
+	Stderr          string   `json:"stderr,omitempty"`
+	FinalResponse   string   `json:"final_response,omitempty"`
 }
 
 type Runner interface {
@@ -49,10 +61,14 @@ type Request struct {
 }
 
 type Response struct {
-	Rationale string
-	RootCause string
-	Stdout    string
-	Stderr    string
+	Rationale       string
+	RootCause       string
+	ChangedSummary  string
+	ValidationNotes string
+	Confidence      *float64
+	Stdout          string
+	Stderr          string
+	FinalResponse   string
 }
 
 type Backend interface {
@@ -81,6 +97,11 @@ func (runner BackendRunner) Run(ctx context.Context, input Input) (Result, error
 		Prompt:       input.Prompt,
 		PromptPath:   input.PromptPath,
 	})
+	if response.FinalResponse != "" {
+		response.applyFinalResponse(ParseFinalResponse(response.FinalResponse))
+	} else if response.Rationale == "" && response.Stdout != "" {
+		response.applyFinalResponse(ParseFinalResponse(response.Stdout))
+	}
 
 	maxLogBytes := runner.MaxLogBytes
 	if maxLogBytes <= 0 {
@@ -88,11 +109,15 @@ func (runner BackendRunner) Run(ctx context.Context, input Input) (Result, error
 	}
 
 	result := Result{
-		Rationale: sanitize.Secrets(response.Rationale),
-		RootCause: sanitize.Secrets(response.RootCause),
-		Backend:   runner.Backend.Name(),
-		Stdout:    sanitize.Log(response.Stdout, maxLogBytes),
-		Stderr:    sanitize.Log(response.Stderr, maxLogBytes),
+		Rationale:       sanitize.Secrets(response.Rationale),
+		RootCause:       sanitize.Secrets(response.RootCause),
+		ChangedSummary:  sanitize.Secrets(response.ChangedSummary),
+		ValidationNotes: sanitize.Secrets(response.ValidationNotes),
+		Confidence:      response.Confidence,
+		Backend:         runner.Backend.Name(),
+		Stdout:          sanitize.Log(response.Stdout, maxLogBytes),
+		Stderr:          sanitize.Log(response.Stderr, maxLogBytes),
+		FinalResponse:   sanitize.Log(response.FinalResponse, maxLogBytes),
 	}
 	return result, err
 }
@@ -105,9 +130,11 @@ func (Stub) Run(ctx context.Context, input Input) (Result, error) {
 	}
 
 	return Result{
-		Rationale: fmt.Sprintf("Stub agent for %s lens did not modify files.", input.Lens.ID),
-		RootCause: "Stub agent did not analyze root cause.",
-		Backend:   "stub",
+		Rationale:       fmt.Sprintf("Stub agent for %s lens did not modify files.", input.Lens.ID),
+		RootCause:       "Stub agent did not analyze root cause.",
+		ChangedSummary:  "No files changed.",
+		ValidationNotes: "Stub agent does not run validation.",
+		Backend:         "stub",
 	}, nil
 }
 
@@ -150,7 +177,13 @@ func (backend CodexBackend) Run(ctx context.Context, request Request) (Response,
 	}
 	defer os.Remove(lastMessagePath)
 
-	args := backend.args(request.WorktreePath, lastMessagePath)
+	schemaPath, err := writeOutputSchema()
+	if err != nil {
+		return Response{}, err
+	}
+	defer os.Remove(schemaPath)
+
+	args := backend.args(request.WorktreePath, lastMessagePath, schemaPath)
 
 	command := strings.TrimSpace(backend.Command)
 	if command == "" {
@@ -177,10 +210,12 @@ func (backend CodexBackend) Run(ctx context.Context, request Request) (Response,
 
 	finalPayload, readErr := os.ReadFile(lastMessagePath)
 	if readErr == nil {
-		response.Rationale, response.RootCause = ParseFinalResponse(string(finalPayload))
+		response.FinalResponse = sanitize.Log(string(finalPayload), maxLogBytes)
+		response.applyFinalResponse(ParseFinalResponse(response.FinalResponse))
 	}
 	if response.Rationale == "" {
-		response.Rationale, response.RootCause = ParseFinalResponse(stdout.String())
+		response.FinalResponse = sanitize.Log(stdout.String(), maxLogBytes)
+		response.applyFinalResponse(ParseFinalResponse(response.FinalResponse))
 	}
 
 	if runCtx.Err() != nil && errors.Is(runCtx.Err(), context.DeadlineExceeded) {
@@ -195,7 +230,7 @@ func (backend CodexBackend) Run(ctx context.Context, request Request) (Response,
 	return response, nil
 }
 
-func (backend CodexBackend) args(worktreePath, lastMessagePath string) []string {
+func (backend CodexBackend) args(worktreePath, lastMessagePath, schemaPath string) []string {
 	args := []string{
 		"exec",
 		"--cd", worktreePath,
@@ -207,6 +242,8 @@ func (backend CodexBackend) args(worktreePath, lastMessagePath string) []string 
 	}
 	args = append(args,
 		"--skip-git-repo-check",
+		"--ephemeral",
+		"--output-schema", schemaPath,
 		"--output-last-message", lastMessagePath,
 	)
 	if backend.Model != "" {
@@ -216,37 +253,125 @@ func (backend CodexBackend) args(worktreePath, lastMessagePath string) []string 
 	return append(args, "-")
 }
 
-func ParseFinalResponse(text string) (string, string) {
-	text = strings.TrimSpace(sanitize.Secrets(text))
+func ParseFinalResponse(text string) FinalResponse {
+	text = strings.TrimSpace(text)
 	if text == "" {
-		return "", ""
+		return FinalResponse{}
 	}
 
-	var structured struct {
-		Rationale string `json:"rationale"`
-		RootCause string `json:"root_cause"`
-	}
+	var structured FinalResponse
 	if err := json.Unmarshal([]byte(text), &structured); err == nil {
-		return strings.TrimSpace(structured.Rationale), strings.TrimSpace(structured.RootCause)
+		return sanitizeFinalResponse(structured)
 	}
 
 	if block := fencedJSON(text); block != "" {
 		if err := json.Unmarshal([]byte(block), &structured); err == nil {
-			return strings.TrimSpace(structured.Rationale), strings.TrimSpace(structured.RootCause)
+			return sanitizeFinalResponse(structured)
 		}
 	}
 
+	text = sanitize.Secrets(text)
 	rationale := section(text, "Rationale")
 	rootCause := section(text, "Root Cause")
 	if rootCause == "" {
 		rootCause = section(text, "RootCause")
 	}
+	changedSummary := section(text, "Changed Summary")
+	if changedSummary == "" {
+		changedSummary = section(text, "ChangedSummary")
+	}
+	validationNotes := section(text, "Validation Notes")
+	if validationNotes == "" {
+		validationNotes = section(text, "ValidationNotes")
+	}
 	if rationale != "" || rootCause != "" {
-		return rationale, rootCause
+		return sanitizeFinalResponse(FinalResponse{
+			Rationale:       rationale,
+			RootCause:       rootCause,
+			ChangedSummary:  changedSummary,
+			ValidationNotes: validationNotes,
+		})
 	}
 
-	return text, ""
+	return FinalResponse{Rationale: text}
 }
+
+func (response *Response) applyFinalResponse(final FinalResponse) {
+	response.Rationale = firstNonEmpty(response.Rationale, final.Rationale)
+	response.RootCause = firstNonEmpty(response.RootCause, final.RootCause)
+	response.ChangedSummary = firstNonEmpty(response.ChangedSummary, final.ChangedSummary)
+	response.ValidationNotes = firstNonEmpty(response.ValidationNotes, final.ValidationNotes)
+	if response.Confidence == nil {
+		response.Confidence = final.Confidence
+	}
+}
+
+func sanitizeFinalResponse(response FinalResponse) FinalResponse {
+	response.Rationale = strings.TrimSpace(sanitize.Secrets(response.Rationale))
+	response.RootCause = strings.TrimSpace(sanitize.Secrets(response.RootCause))
+	response.ChangedSummary = strings.TrimSpace(sanitize.Secrets(response.ChangedSummary))
+	response.ValidationNotes = strings.TrimSpace(sanitize.Secrets(response.ValidationNotes))
+	return response
+}
+
+func writeOutputSchema() (string, error) {
+	file, err := os.CreateTemp("", "varsynth-codex-schema-*.json")
+	if err != nil {
+		return "", fmt.Errorf("create codex output schema: %w", err)
+	}
+	path := file.Name()
+	_, writeErr := file.WriteString(finalResponseSchema)
+	closeErr := file.Close()
+	if writeErr != nil {
+		_ = os.Remove(path)
+		return "", fmt.Errorf("write codex output schema: %w", writeErr)
+	}
+	if closeErr != nil {
+		_ = os.Remove(path)
+		return "", fmt.Errorf("close codex output schema: %w", closeErr)
+	}
+	return path, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+const finalResponseSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["rationale", "root_cause", "changed_summary", "validation_notes", "confidence"],
+  "properties": {
+    "rationale": {
+      "type": "string",
+      "description": "What changed and why."
+    },
+    "root_cause": {
+      "type": "string",
+      "description": "The underlying defect or failure path addressed."
+    },
+    "changed_summary": {
+      "type": "string",
+      "description": "Concise summary of files or behavior changed."
+    },
+    "validation_notes": {
+      "type": "string",
+      "description": "Validation command results, skipped validation, or known validation limits."
+    },
+    "confidence": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Confidence from 0 to 1, or null when not estimated."
+    }
+  }
+}
+`
 
 func validateInput(ctx context.Context, input Input) error {
 	if err := ctx.Err(); err != nil {

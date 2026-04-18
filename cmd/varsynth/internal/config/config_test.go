@@ -39,6 +39,9 @@ func TestParseCodexAgentOptions(t *testing.T) {
 		"--codex-model", "gpt-5.4",
 		"--codex-full-auto=false",
 		"--agent-timeout", "10m",
+		"--agent-concurrency", "1",
+		"--agent-retries", "2",
+		"--agent-retry-delay", "500ms",
 	}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatalf("Parse() returned error: %v", err)
@@ -59,6 +62,15 @@ func TestParseCodexAgentOptions(t *testing.T) {
 	if cfg.AgentTimeout != 10*time.Minute {
 		t.Fatalf("AgentTimeout = %s, want 10m", cfg.AgentTimeout)
 	}
+	if cfg.AgentConcurrency != 1 {
+		t.Fatalf("AgentConcurrency = %d, want 1", cfg.AgentConcurrency)
+	}
+	if cfg.AgentRetries != 2 {
+		t.Fatalf("AgentRetries = %d, want 2", cfg.AgentRetries)
+	}
+	if cfg.AgentRetryDelay != 500*time.Millisecond {
+		t.Fatalf("AgentRetryDelay = %s, want 500ms", cfg.AgentRetryDelay)
+	}
 }
 
 func TestParseRejectsUnknownAgent(t *testing.T) {
@@ -68,6 +80,21 @@ func TestParseRejectsUnknownAgent(t *testing.T) {
 		"--test-command", "go test ./...",
 		"--out", "/out",
 		"--agent", "other",
+	}, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("Parse() returned nil error")
+	}
+}
+
+func TestParseRejectsNegativeAgentControls(t *testing.T) {
+	_, err := Parse([]string{
+		"--repo", "/repo",
+		"--issue-file", "/issue.json",
+		"--test-command", "go test ./...",
+		"--out", "/out",
+		"--agent-concurrency", "-1",
+		"--agent-retries", "-1",
+		"--agent-retry-delay", "-1s",
 	}, &bytes.Buffer{})
 	if err == nil {
 		t.Fatal("Parse() returned nil error")

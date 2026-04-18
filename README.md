@@ -93,11 +93,18 @@ Optional Codex settings:
 - `--codex-full-auto=false` disables Codex full-auto mode and uses an
   explicit `workspace-write` sandbox instead.
 - `--agent-timeout` sets a per-candidate agent timeout, for example `10m`.
+- `--agent-concurrency` caps concurrent agent runs. The default `0` keeps all
+  lenses running concurrently for demo speed.
+- `--agent-retries` retries transient agent/backend failures before recording a
+  failed candidate artifact.
+- `--agent-retry-delay` sets the base retry delay, for example `2s`.
 
 By default, `--agent codex` invokes `codex exec --full-auto` for each candidate
 worktree. This avoids interactive approvals while keeping execution sandboxed to
 the worktree. Commands that need network access or writes outside the worktree
-should still fail instead of blocking for manual approval.
+should still fail instead of blocking for manual approval. Codex-backed runs also
+pass a JSON output schema so final responses populate rationale, root-cause,
+changed-summary, validation-notes, and confidence fields.
 
 ## Expected Output
 
@@ -116,6 +123,10 @@ Normal output writes:
 - `out/demo/candidates/minimalist.json`
 - `out/demo/candidates/architect.json`
 - `out/demo/candidates/performance.json`
+- `out/demo/agents/<lens>/stdout.log`
+- `out/demo/agents/<lens>/stderr.log`
+- `out/demo/agents/<lens>/final_response.json`
+- `out/demo/run_events.jsonl`
 - `out/demo/report.json`
 
 If `--preserve-worktrees` is used, candidate worktrees are also kept under:

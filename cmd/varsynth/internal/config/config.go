@@ -27,6 +27,9 @@ type Config struct {
 	CodexModel        string
 	CodexFullAuto     bool
 	AgentTimeout      time.Duration
+	AgentConcurrency  int
+	AgentRetries      int
+	AgentRetryDelay   time.Duration
 }
 
 // Parse converts CLI arguments into a validated config and normalizes path-like fields.
@@ -46,6 +49,9 @@ func Parse(args []string, stderr io.Writer) (Config, error) {
 	fs.StringVar(&cfg.CodexModel, "codex-model", "", "Codex model override used when --agent codex")
 	fs.BoolVar(&cfg.CodexFullAuto, "codex-full-auto", true, "Run Codex in full-auto sandboxed mode when --agent codex")
 	fs.DurationVar(&cfg.AgentTimeout, "agent-timeout", 0, "Optional timeout for each agent run, for example 10m")
+	fs.IntVar(&cfg.AgentConcurrency, "agent-concurrency", 0, "Maximum concurrent agent runs; 0 runs all lenses concurrently")
+	fs.IntVar(&cfg.AgentRetries, "agent-retries", 0, "Number of retries after an agent/backend failure")
+	fs.DurationVar(&cfg.AgentRetryDelay, "agent-retry-delay", 0, "Base delay between agent retries, for example 2s")
 
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
@@ -92,6 +98,15 @@ func (c Config) Validate() error {
 	case "", AgentStub, AgentCodex:
 	default:
 		errs = append(errs, fmt.Errorf("--agent must be %q or %q", AgentStub, AgentCodex))
+	}
+	if c.AgentConcurrency < 0 {
+		errs = append(errs, errors.New("--agent-concurrency must be greater than or equal to 0"))
+	}
+	if c.AgentRetries < 0 {
+		errs = append(errs, errors.New("--agent-retries must be greater than or equal to 0"))
+	}
+	if c.AgentRetryDelay < 0 {
+		errs = append(errs, errors.New("--agent-retry-delay must be greater than or equal to 0"))
 	}
 
 	return errors.Join(errs...)

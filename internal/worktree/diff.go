@@ -3,6 +3,8 @@ package worktree
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -18,6 +20,9 @@ func CollectDiff(ctx context.Context, tree Tree) (Diff, error) {
 		return Diff{}, fmt.Errorf("worktree path is required")
 	}
 
+	if err := removeUntrackedCodexArtifact(ctx, tree.Path); err != nil {
+		return Diff{}, err
+	}
 	if err := markUntrackedIntentToAdd(ctx, tree.Path); err != nil {
 		return Diff{}, err
 	}
@@ -40,6 +45,23 @@ func CollectDiff(ctx context.Context, tree Tree) (Diff, error) {
 		Text:         diffText,
 		Empty:        diffText == "",
 	}, nil
+}
+
+func removeUntrackedCodexArtifact(ctx context.Context, path string) error {
+	codexPath := filepath.Join(path, ".codex")
+	if _, err := os.Lstat(codexPath); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("inspect codex artifact: %w", err)
+	}
+
+	if _, err := git(ctx, path, "ls-files", "--error-unmatch", "--", ".codex"); err == nil {
+		return nil
+	}
+	if err := os.RemoveAll(codexPath); err != nil {
+		return fmt.Errorf("remove untracked codex artifact: %w", err)
+	}
+	return nil
 }
 
 func markUntrackedIntentToAdd(ctx context.Context, path string) error {

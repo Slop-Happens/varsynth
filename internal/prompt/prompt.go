@@ -165,7 +165,7 @@ func Build(ctx Context, definition lens.Definition) (Payload, error) {
 	writeSection(&out, "Output Expectations")
 	writeLine(&out, "- Modify files only inside the candidate worktree.")
 	writeLine(&out, "- Keep the final diff focused and reviewable.")
-	writeLine(&out, "- Final response must include `Rationale:` and `Root Cause:` sections.")
+	writeLine(&out, "- Final response must be a JSON object with `rationale`, `root_cause`, `changed_summary`, `validation_notes`, and `confidence` from 0 to 1 or null.")
 
 	text := sanitize.Secrets(strings.TrimRight(out.String(), "\n") + "\n")
 	return Payload{

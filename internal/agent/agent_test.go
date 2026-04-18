@@ -94,10 +94,9 @@ func TestBackendRunnerPassesPromptAndCapturesOutput(t *testing.T) {
 	}
 	backend := &recordingBackend{
 		response: Response{
-			Rationale: "changed cache handling",
-			RootCause: "stale cache entry",
-			Stdout:    "token=secret-token-value",
-			Stderr:    "warning",
+			FinalResponse: `{"rationale":"changed cache handling","root_cause":"stale cache entry","changed_summary":"updated cache code","validation_notes":"not run","confidence":0.75}`,
+			Stdout:        "token=secret-token-value",
+			Stderr:        "warning",
 		},
 	}
 
@@ -124,6 +123,15 @@ func TestBackendRunnerPassesPromptAndCapturesOutput(t *testing.T) {
 	}
 	if result.RootCause != "stale cache entry" {
 		t.Fatalf("RootCause = %q", result.RootCause)
+	}
+	if result.ChangedSummary != "updated cache code" {
+		t.Fatalf("ChangedSummary = %q", result.ChangedSummary)
+	}
+	if result.ValidationNotes != "not run" {
+		t.Fatalf("ValidationNotes = %q", result.ValidationNotes)
+	}
+	if result.Confidence == nil || *result.Confidence != 0.75 {
+		t.Fatalf("Confidence = %v, want 0.75", result.Confidence)
 	}
 	if strings.Contains(result.Stdout, "secret-token-value") {
 		t.Fatalf("Stdout leaked secret: %q", result.Stdout)
@@ -162,22 +170,35 @@ func TestBackendRunnerReturnsPartialResultOnFailure(t *testing.T) {
 }
 
 func TestParseFinalResponse(t *testing.T) {
-	rationale, rootCause := ParseFinalResponse(strings.Join([]string{
+	final := ParseFinalResponse(strings.Join([]string{
 		"Rationale:",
 		"Updated nil handling.",
 		"Root Cause:",
 		"Missing guard before dereference.",
+		"Changed Summary:",
+		"Added nil check.",
+		"Validation Notes:",
+		"go test passed.",
 	}, "\n"))
-	if rationale != "Updated nil handling." {
-		t.Fatalf("rationale = %q", rationale)
+	if final.Rationale != "Updated nil handling." {
+		t.Fatalf("rationale = %q", final.Rationale)
 	}
-	if rootCause != "Missing guard before dereference." {
-		t.Fatalf("rootCause = %q", rootCause)
+	if final.RootCause != "Missing guard before dereference." {
+		t.Fatalf("rootCause = %q", final.RootCause)
+	}
+	if final.ChangedSummary != "Added nil check." {
+		t.Fatalf("changedSummary = %q", final.ChangedSummary)
+	}
+	if final.ValidationNotes != "go test passed." {
+		t.Fatalf("validationNotes = %q", final.ValidationNotes)
 	}
 
-	rationale, rootCause = ParseFinalResponse(`{"rationale":"small patch","root_cause":"bad branch"}`)
-	if rationale != "small patch" || rootCause != "bad branch" {
-		t.Fatalf("json parse = %q / %q", rationale, rootCause)
+	final = ParseFinalResponse(`{"rationale":"small patch","root_cause":"bad branch","changed_summary":"one file","validation_notes":"passed","confidence":0.9}`)
+	if final.Rationale != "small patch" || final.RootCause != "bad branch" {
+		t.Fatalf("json parse = %q / %q", final.Rationale, final.RootCause)
+	}
+	if final.Confidence == nil || *final.Confidence != 0.9 {
+		t.Fatalf("json confidence = %v, want 0.9", final.Confidence)
 	}
 }
 
@@ -185,10 +206,10 @@ func TestCodexBackendArgsUseFullAutoByDefault(t *testing.T) {
 	args := CodexBackend{
 		Model:    "gpt-5.4",
 		FullAuto: true,
-	}.args("/tmp/worktree", "/tmp/last.md")
+	}.args("/tmp/worktree", "/tmp/last.md", "/tmp/schema.json")
 
 	joined := strings.Join(args, " ")
-	for _, want := range []string{"exec", "--cd /tmp/worktree", "--full-auto", "--skip-git-repo-check", "--output-last-message /tmp/last.md", "--model gpt-5.4"} {
+	for _, want := range []string{"exec", "--cd /tmp/worktree", "--full-auto", "--skip-git-repo-check", "--ephemeral", "--output-schema /tmp/schema.json", "--output-last-message /tmp/last.md", "--model gpt-5.4"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("args %q missing %q", joined, want)
 		}
@@ -199,7 +220,7 @@ func TestCodexBackendArgsUseFullAutoByDefault(t *testing.T) {
 }
 
 func TestCodexBackendArgsCanDisableFullAuto(t *testing.T) {
-	args := CodexBackend{}.args("/tmp/worktree", "/tmp/last.md")
+	args := CodexBackend{}.args("/tmp/worktree", "/tmp/last.md", "/tmp/schema.json")
 	joined := strings.Join(args, " ")
 	if strings.Contains(joined, "--full-auto") {
 		t.Fatalf("args %q should not include --full-auto", joined)

@@ -87,6 +87,34 @@ func TestCollectDiffIncludesUntrackedFiles(t *testing.T) {
 	}
 }
 
+func TestCollectDiffRemovesUntrackedCodexArtifact(t *testing.T) {
+	ctx := context.Background()
+	tree, cleanup := createTestWorktree(t, ctx, lens.Architect)
+	defer cleanup()
+
+	if err := os.WriteFile(filepath.Join(tree.Path, ".codex"), nil, 0o644); err != nil {
+		t.Fatalf("WriteFile(.codex) returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tree.Path, "app.txt"), []byte("hello\nworld\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(app.txt) returned error: %v", err)
+	}
+
+	diff, err := CollectDiff(ctx, tree)
+	if err != nil {
+		t.Fatalf("CollectDiff() returned error: %v", err)
+	}
+
+	if len(diff.ChangedFiles) != 1 || diff.ChangedFiles[0] != "app.txt" {
+		t.Fatalf("ChangedFiles = %#v, want app.txt", diff.ChangedFiles)
+	}
+	if strings.Contains(diff.Text, ".codex") {
+		t.Fatalf("Text contains generated .codex artifact:\n%s", diff.Text)
+	}
+	if _, err := os.Stat(filepath.Join(tree.Path, ".codex")); !os.IsNotExist(err) {
+		t.Fatalf(".codex should have been removed, stat err = %v", err)
+	}
+}
+
 func TestCollectDiffRequiresWorktreePath(t *testing.T) {
 	_, err := CollectDiff(context.Background(), Tree{})
 	if err == nil {

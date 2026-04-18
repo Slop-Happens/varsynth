@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"github.com/Slop-Happens/varsynth/internal/lens"
 	"github.com/Slop-Happens/varsynth/internal/prompt"
 	"github.com/Slop-Happens/varsynth/internal/report"
+	"github.com/Slop-Happens/varsynth/internal/sanitize"
 	"github.com/Slop-Happens/varsynth/internal/validation"
 	"github.com/Slop-Happens/varsynth/internal/worktree"
 )
@@ -27,17 +30,22 @@ type Options struct {
 	PreserveWorktrees     bool
 	ValidationTimeout     time.Duration
 	MaxValidationLogBytes int
+	MaxAgentLogBytes      int
+	AgentConcurrency      int
+	AgentRetries          int
+	AgentRetryDelay       time.Duration
 	PromptContext         prompt.Context
 	Agent                 agent.Runner
 }
 
 type Result struct {
-	RunID        string
-	OutDir       string
-	WorktreeRoot string
-	ReportPath   string
-	Candidates   []CandidateResult
-	CleanupError string
+	RunID         string
+	OutDir        string
+	WorktreeRoot  string
+	ReportPath    string
+	RunEventsPath string
+	Candidates    []CandidateResult
+	CleanupError  string
 }
 
 type CandidateResult struct {
@@ -78,11 +86,14 @@ func Execute(ctx context.Context, opts Options) (Result, error) {
 	}
 
 	result := Result{
-		RunID:        opts.RunID,
-		OutDir:       opts.OutDir,
-		WorktreeRoot: manager.RootDir(),
-		Candidates:   make([]CandidateResult, len(lens.All())),
+		RunID:         opts.RunID,
+		OutDir:        opts.OutDir,
+		WorktreeRoot:  manager.RootDir(),
+		RunEventsPath: RunEventsPath(opts.OutDir),
+		Candidates:    make([]CandidateResult, len(lens.All())),
 	}
+	events := newEventRecorder(opts.OutDir, opts.RunID)
+	_ = os.Remove(events.Path())
 
 	var prepared []preparedCandidate
 	for i, definition := range lens.All() {
@@ -95,7 +106,7 @@ func Execute(ctx context.Context, opts Options) (Result, error) {
 		tree, err := manager.Create(ctx, definition)
 		if err != nil {
 			artifact.MarkFailedAt(candidate.FailureSetup, err)
-			result.Candidates[i] = writeCandidate(opts.OutDir, artifact, candidateResult)
+			result.Candidates[i] = writeCandidate(opts.OutDir, artifact, candidateResult, events)
 			continue
 		}
 		artifact.WorktreePath = tree.Path
@@ -107,9 +118,10 @@ func Execute(ctx context.Context, opts Options) (Result, error) {
 		})
 	}
 
-	executePreparedCandidates(ctx, opts, runner, prepared, result.Candidates)
+	executePreparedCandidates(ctx, opts, runner, prepared, result.Candidates, events)
 
 	writeErrors := collectWriteErrors(result.Candidates)
+	writeErrors = append(writeErrors, events.Errors()...)
 	if err := manager.Cleanup(ctx); err != nil {
 		result.CleanupError = err.Error()
 		writeErrors = append(writeErrors, err)
@@ -125,7 +137,7 @@ func Execute(ctx context.Context, opts Options) (Result, error) {
 	return result, joinErrors(writeErrors)
 }
 
-func executePreparedCandidates(ctx context.Context, opts Options, runner agent.Runner, prepared []preparedCandidate, results []CandidateResult) {
+func executePreparedCandidates(ctx context.Context, opts Options, runner agent.Runner, prepared []preparedCandidate, results []CandidateResult, events *eventRecorder) {
 	type indexedResult struct {
 		index  int
 		result CandidateResult
@@ -133,6 +145,7 @@ func executePreparedCandidates(ctx context.Context, opts Options, runner agent.R
 
 	ch := make(chan indexedResult, len(prepared))
 	var wg sync.WaitGroup
+	agentLimit := make(chan struct{}, agentConcurrency(opts, len(prepared)))
 	for _, candidate := range prepared {
 		candidate := candidate
 		wg.Add(1)
@@ -147,6 +160,8 @@ func executePreparedCandidates(ctx context.Context, opts Options, runner agent.R
 					candidate.Definition,
 					candidate.Tree,
 					candidate.Artifact,
+					agentLimit,
+					events,
 				),
 			}
 		}()
@@ -159,7 +174,7 @@ func executePreparedCandidates(ctx context.Context, opts Options, runner agent.R
 	}
 }
 
-func executePreparedCandidate(ctx context.Context, opts Options, runner agent.Runner, definition lens.Definition, tree worktree.Tree, artifact candidate.Artifact) CandidateResult {
+func executePreparedCandidate(ctx context.Context, opts Options, runner agent.Runner, definition lens.Definition, tree worktree.Tree, artifact candidate.Artifact, agentLimit chan struct{}, events *eventRecorder) CandidateResult {
 	candidateResult := CandidateResult{
 		LensID:   definition.ID,
 		Artifact: artifact,
@@ -168,41 +183,44 @@ func executePreparedCandidate(ctx context.Context, opts Options, runner agent.Ru
 	promptPayload, err := prompt.Build(promptContext(opts), definition)
 	if err != nil {
 		artifact.MarkFailedAt(candidate.FailurePrompt, err)
-		return writeCandidate(opts.OutDir, artifact, candidateResult)
+		return writeCandidate(opts.OutDir, artifact, candidateResult, events)
 	}
 	promptPath, err := prompt.Write(opts.OutDir, promptPayload)
 	if err != nil {
 		artifact.MarkFailedAt(candidate.FailurePrompt, err)
-		return writeCandidate(opts.OutDir, artifact, candidateResult)
+		return writeCandidate(opts.OutDir, artifact, candidateResult, events)
 	}
 	artifact.PromptPath = promptPath
+	events.Emit(Event{
+		LensID: definition.ID,
+		Type:   eventPromptWritten,
+		Path:   promptPath,
+	})
 
-	agentResult, err := runner.Run(ctx, agent.Input{
-		RunID:        opts.RunID,
-		Lens:         definition,
-		WorktreePath: tree.Path,
-		TestCommand:  opts.TestCommand,
-		Prompt:       promptPayload.Text,
-		PromptPath:   promptPath,
-	})
-	artifact.SetAgentResult(agentResult.Rationale, agentResult.RootCause, candidate.AgentResult{
-		Backend: agentResult.Backend,
-		Stdout:  agentResult.Stdout,
-		Stderr:  agentResult.Stderr,
-	})
+	agentResult, agentMeta, err := runAgentWithRetry(ctx, opts, runner, definition, tree, promptPayload, promptPath, agentLimit, events)
+	artifact.SetAgentResult(agentResult.Rationale, agentResult.RootCause, agentResult.ChangedSummary, agentResult.ValidationNotes, agentResult.Confidence, agentMeta)
 	if err != nil {
 		artifact.MarkFailedAt(candidate.FailureAgent, err)
-		return writeCandidate(opts.OutDir, artifact, candidateResult)
+		return writeCandidate(opts.OutDir, artifact, candidateResult, events)
 	}
 	artifact.MarkAgentNoop()
 
 	diff, err := worktree.CollectDiff(ctx, tree)
 	if err != nil {
 		artifact.MarkFailedAt(candidate.FailureDiff, err)
-		return writeCandidate(opts.OutDir, artifact, candidateResult)
+		return writeCandidate(opts.OutDir, artifact, candidateResult, events)
 	}
 	artifact.SetDiff(diff.ChangedFiles, diff.Text)
+	events.Emit(Event{
+		LensID:       definition.ID,
+		Type:         eventDiffCollected,
+		ChangedFiles: len(diff.ChangedFiles),
+	})
 
+	events.Emit(Event{
+		LensID: definition.ID,
+		Type:   eventValidationStarted,
+	})
 	validationResult := validation.Run(ctx, validation.Options{
 		Command:     opts.TestCommand,
 		WorkDir:     tree.Path,
@@ -210,8 +228,102 @@ func executePreparedCandidate(ctx context.Context, opts Options, runner agent.Ru
 		MaxLogBytes: opts.MaxValidationLogBytes,
 	})
 	artifact.SetValidation(validationResult)
+	events.Emit(Event{
+		LensID:     definition.ID,
+		Type:       eventValidationFinished,
+		Status:     string(validationResult.Status),
+		DurationMS: validationResult.DurationMS,
+		Error:      validationResult.Error,
+	})
 
-	return writeCandidate(opts.OutDir, artifact, candidateResult)
+	return writeCandidate(opts.OutDir, artifact, candidateResult, events)
+}
+
+func runAgentWithRetry(ctx context.Context, opts Options, runner agent.Runner, definition lens.Definition, tree worktree.Tree, promptPayload prompt.Payload, promptPath string, agentLimit chan struct{}, events *eventRecorder) (agent.Result, candidate.AgentResult, error) {
+	maxLogBytes := opts.MaxAgentLogBytes
+	if maxLogBytes <= 0 {
+		maxLogBytes = agent.DefaultMaxLogBytes
+	}
+
+	totalAttempts := 1 + opts.AgentRetries
+	if totalAttempts < 1 {
+		totalAttempts = 1
+	}
+
+	meta := candidate.AgentResult{
+		LogDir: filepath.Join(opts.OutDir, "agents", string(definition.ID)),
+	}
+	var lastResult agent.Result
+	var lastErr error
+
+	for attempt := 1; attempt <= totalAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			lastErr = err
+			break
+		}
+		if err := acquire(ctx, agentLimit); err != nil {
+			lastErr = err
+			break
+		}
+
+		events.Emit(Event{
+			LensID:  definition.ID,
+			Type:    eventAgentStarted,
+			Attempt: attempt,
+		})
+		startedAt := time.Now()
+		result, err := runner.Run(ctx, agent.Input{
+			RunID:        opts.RunID,
+			Lens:         definition,
+			WorktreePath: tree.Path,
+			TestCommand:  opts.TestCommand,
+			Prompt:       promptPayload.Text,
+			PromptPath:   promptPath,
+		})
+		release(agentLimit)
+
+		lastResult = result
+		lastErr = err
+		attemptMeta := writeAgentArtifacts(meta.LogDir, attempt, result, err, time.Since(startedAt).Milliseconds(), maxLogBytes)
+		meta.Attempts = append(meta.Attempts, attemptMeta)
+		meta.AttemptCount = len(meta.Attempts)
+		meta.Backend = firstNonEmpty(meta.Backend, result.Backend)
+		meta.Stdout = result.Stdout
+		meta.Stderr = result.Stderr
+		meta.FinalResponse = result.FinalResponse
+		meta.StdoutPath = filepath.Join(meta.LogDir, "stdout.log")
+		meta.StderrPath = filepath.Join(meta.LogDir, "stderr.log")
+		meta.FinalResponsePath = filepath.Join(meta.LogDir, "final_response.json")
+
+		if err == nil {
+			events.Emit(Event{
+				LensID:     definition.ID,
+				Type:       eventAgentFinished,
+				Attempt:    attempt,
+				Status:     "success",
+				DurationMS: attemptMeta.DurationMS,
+			})
+			return result, meta, nil
+		}
+
+		events.Emit(Event{
+			LensID:     definition.ID,
+			Type:       eventAgentFailed,
+			Attempt:    attempt,
+			Status:     "failed",
+			DurationMS: attemptMeta.DurationMS,
+			Error:      err.Error(),
+		})
+		if attempt == totalAttempts {
+			break
+		}
+		if err := sleepBeforeRetry(ctx, opts.AgentRetryDelay, attempt); err != nil {
+			lastErr = err
+			break
+		}
+	}
+
+	return lastResult, meta, lastErr
 }
 
 func promptContext(opts Options) prompt.Context {
@@ -241,7 +353,7 @@ func collectWriteErrors(results []CandidateResult) []error {
 	return writeErrors
 }
 
-func writeCandidate(outDir string, artifact candidate.Artifact, result CandidateResult) CandidateResult {
+func writeCandidate(outDir string, artifact candidate.Artifact, result CandidateResult, events *eventRecorder) CandidateResult {
 	path, err := candidate.Write(outDir, artifact)
 	if err != nil {
 		result.Error = err.Error()
@@ -250,19 +362,27 @@ func writeCandidate(outDir string, artifact candidate.Artifact, result Candidate
 	}
 	result.ArtifactPath = path
 	result.Artifact = artifact
+	events.Emit(Event{
+		LensID: artifact.Lens.ID,
+		Type:   eventCandidateWritten,
+		Path:   path,
+		Status: string(artifact.Status),
+		Error:  artifact.Error,
+	})
 	return result
 }
 
 func buildReport(opts Options, result Result) report.Summary {
 	summary := report.Summary{
-		RunID:        opts.RunID,
-		RepoRoot:     opts.RepoRoot,
-		BaseCommit:   opts.BaseCommit,
-		TestCommand:  opts.TestCommand,
-		OutDir:       opts.OutDir,
-		WorktreeRoot: result.WorktreeRoot,
-		CleanupError: result.CleanupError,
-		Candidates:   make([]report.CandidateSummary, 0, len(result.Candidates)),
+		RunID:         opts.RunID,
+		RepoRoot:      opts.RepoRoot,
+		BaseCommit:    opts.BaseCommit,
+		TestCommand:   opts.TestCommand,
+		OutDir:        opts.OutDir,
+		WorktreeRoot:  result.WorktreeRoot,
+		RunEventsPath: result.RunEventsPath,
+		CleanupError:  result.CleanupError,
+		Candidates:    make([]report.CandidateSummary, 0, len(result.Candidates)),
 	}
 	for _, candidateResult := range result.Candidates {
 		summary.Candidates = append(summary.Candidates, report.FromArtifact(
@@ -272,6 +392,95 @@ func buildReport(opts Options, result Result) report.Summary {
 		))
 	}
 	return summary
+}
+
+func agentConcurrency(opts Options, prepared int) int {
+	if opts.AgentConcurrency > 0 {
+		return opts.AgentConcurrency
+	}
+	if prepared > 0 {
+		return prepared
+	}
+	return 1
+}
+
+func acquire(ctx context.Context, limit chan struct{}) error {
+	if limit == nil {
+		return nil
+	}
+	select {
+	case limit <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func release(limit chan struct{}) {
+	if limit != nil {
+		<-limit
+	}
+}
+
+func sleepBeforeRetry(ctx context.Context, delay time.Duration, attempt int) error {
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay * time.Duration(attempt))
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func writeAgentArtifacts(logDir string, attempt int, result agent.Result, runErr error, durationMS int64, maxLogBytes int) candidate.AgentAttempt {
+	status := "success"
+	errText := ""
+	if runErr != nil {
+		status = "failed"
+		errText = runErr.Error()
+	}
+
+	attemptDir := filepath.Join(logDir, fmt.Sprintf("attempt-%d", attempt))
+	stdoutPath := filepath.Join(attemptDir, "stdout.log")
+	stderrPath := filepath.Join(attemptDir, "stderr.log")
+	finalResponsePath := filepath.Join(attemptDir, "final_response.json")
+	latestStdoutPath := filepath.Join(logDir, "stdout.log")
+	latestStderrPath := filepath.Join(logDir, "stderr.log")
+	latestFinalResponsePath := filepath.Join(logDir, "final_response.json")
+
+	_ = os.MkdirAll(attemptDir, 0o755)
+	stdout := []byte(sanitize.Log(result.Stdout, maxLogBytes))
+	stderr := []byte(sanitize.Log(result.Stderr, maxLogBytes))
+	finalResponse := []byte(sanitize.Log(result.FinalResponse, maxLogBytes))
+	_ = os.WriteFile(stdoutPath, stdout, 0o644)
+	_ = os.WriteFile(stderrPath, stderr, 0o644)
+	_ = os.WriteFile(finalResponsePath, finalResponse, 0o644)
+	_ = os.WriteFile(latestStdoutPath, stdout, 0o644)
+	_ = os.WriteFile(latestStderrPath, stderr, 0o644)
+	_ = os.WriteFile(latestFinalResponsePath, finalResponse, 0o644)
+
+	return candidate.AgentAttempt{
+		Attempt:           attempt,
+		Status:            status,
+		DurationMS:        durationMS,
+		Error:             sanitize.Secrets(errText),
+		StdoutPath:        stdoutPath,
+		StderrPath:        stderrPath,
+		FinalResponsePath: finalResponsePath,
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func joinErrors(errs []error) error {
