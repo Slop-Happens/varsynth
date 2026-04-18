@@ -8,7 +8,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/Slop-Happens/varsynth/internal/agent"
 	"github.com/Slop-Happens/varsynth/internal/candidate"
@@ -122,6 +124,82 @@ func TestExecutePreservesWorktrees(t *testing.T) {
 		if _, err := os.Stat(candidateResult.Artifact.WorktreePath); err != nil {
 			t.Fatalf("%s preserved worktree missing: %v", candidateResult.LensID, err)
 		}
+	}
+}
+
+func TestExecuteRunsAgentsConcurrently(t *testing.T) {
+	ctx := context.Background()
+	repoRoot, baseCommit := initRepo(t, ctx)
+	probe := &concurrencyAgent{delay: 100 * time.Millisecond}
+
+	result, err := Execute(ctx, Options{
+		RunID:        "run-parallel",
+		RepoRoot:     repoRoot,
+		BaseCommit:   baseCommit,
+		TestCommand:  "true",
+		OutDir:       t.TempDir(),
+		WorktreeRoot: filepath.Join(t.TempDir(), "worktrees"),
+		Agent:        probe,
+	})
+	if err != nil {
+		t.Fatalf("Execute() returned error: %v", err)
+	}
+	if len(result.Candidates) != len(lens.All()) {
+		t.Fatalf("Execute() returned %d candidates, want %d", len(result.Candidates), len(lens.All()))
+	}
+	if probe.MaxConcurrent() < 2 {
+		t.Fatalf("max concurrent agent calls = %d, want at least 2", probe.MaxConcurrent())
+	}
+}
+
+func TestExecuteWaitsForAllConcurrentAgents(t *testing.T) {
+	ctx := context.Background()
+	repoRoot, baseCommit := initRepo(t, ctx)
+	gate := newBlockingAgent(len(lens.All()))
+	done := make(chan executeResult, 1)
+
+	go func() {
+		result, err := Execute(ctx, Options{
+			RunID:        "run-wait",
+			RepoRoot:     repoRoot,
+			BaseCommit:   baseCommit,
+			TestCommand:  "true",
+			OutDir:       t.TempDir(),
+			WorktreeRoot: filepath.Join(t.TempDir(), "worktrees"),
+			Agent:        gate,
+		})
+		done <- executeResult{result: result, err: err}
+	}()
+
+	gate.waitForAllStarted(t)
+
+	select {
+	case completed := <-done:
+		t.Fatalf("Execute() returned before agents were released: result=%#v err=%v", completed.result, completed.err)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	gate.release()
+
+	select {
+	case completed := <-done:
+		if completed.err != nil {
+			t.Fatalf("Execute() returned error: %v", completed.err)
+		}
+		if len(completed.result.Candidates) != len(lens.All()) {
+			t.Fatalf("Execute() returned %d candidates, want %d", len(completed.result.Candidates), len(lens.All()))
+		}
+		for _, candidateResult := range completed.result.Candidates {
+			if candidateResult.Artifact.Status != candidate.StatusValidationPassed {
+				t.Fatalf("%s Status = %q, want %q", candidateResult.LensID, candidateResult.Artifact.Status, candidate.StatusValidationPassed)
+			}
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Execute() did not return after agents were released")
+	}
+
+	if gate.Completed() != len(lens.All()) {
+		t.Fatalf("completed agent calls = %d, want %d", gate.Completed(), len(lens.All()))
 	}
 }
 
@@ -255,6 +333,116 @@ func (script scriptedAgent) Run(ctx context.Context, input agent.Input) (agent.R
 		return agent.Result{}, err
 	}
 	return script.run(input)
+}
+
+type concurrencyAgent struct {
+	mu      sync.Mutex
+	current int
+	max     int
+	delay   time.Duration
+}
+
+func (probe *concurrencyAgent) Run(ctx context.Context, input agent.Input) (agent.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return agent.Result{}, err
+	}
+
+	probe.mu.Lock()
+	probe.current++
+	if probe.current > probe.max {
+		probe.max = probe.current
+	}
+	probe.mu.Unlock()
+	defer func() {
+		probe.mu.Lock()
+		probe.current--
+		probe.mu.Unlock()
+	}()
+
+	select {
+	case <-time.After(probe.delay):
+	case <-ctx.Done():
+		return agent.Result{}, ctx.Err()
+	}
+
+	return agent.Result{
+		Rationale: "concurrency probe",
+		RootCause: "concurrency probe",
+	}, nil
+}
+
+func (probe *concurrencyAgent) MaxConcurrent() int {
+	probe.mu.Lock()
+	defer probe.mu.Unlock()
+	return probe.max
+}
+
+type executeResult struct {
+	result Result
+	err    error
+}
+
+type blockingAgent struct {
+	expected  int
+	started   chan lens.ID
+	released  chan struct{}
+	completed int
+	mu        sync.Mutex
+}
+
+func newBlockingAgent(expected int) *blockingAgent {
+	return &blockingAgent{
+		expected: expected,
+		started:  make(chan lens.ID, expected),
+		released: make(chan struct{}),
+	}
+}
+
+func (gate *blockingAgent) Run(ctx context.Context, input agent.Input) (agent.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return agent.Result{}, err
+	}
+
+	gate.started <- input.Lens.ID
+
+	select {
+	case <-gate.released:
+	case <-ctx.Done():
+		return agent.Result{}, ctx.Err()
+	}
+
+	gate.mu.Lock()
+	gate.completed++
+	gate.mu.Unlock()
+
+	return agent.Result{
+		Rationale: "blocking probe",
+		RootCause: "blocking probe",
+	}, nil
+}
+
+func (gate *blockingAgent) waitForAllStarted(t *testing.T) {
+	t.Helper()
+
+	seen := map[lens.ID]bool{}
+	for len(seen) < gate.expected {
+		select {
+		case id := <-gate.started:
+			seen[id] = true
+		case <-time.After(2 * time.Second):
+			t.Fatalf("only saw %d/%d agent calls start", len(seen), gate.expected)
+		}
+	}
+}
+
+func (gate *blockingAgent) release() {
+	close(gate.released)
+}
+
+func (gate *blockingAgent) Completed() int {
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	return gate.completed
 }
 
 func initRepo(t *testing.T, ctx context.Context) (string, string) {

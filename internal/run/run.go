@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Slop-Happens/varsynth/internal/agent"
@@ -44,6 +45,13 @@ type CandidateResult struct {
 	Error        string
 }
 
+type preparedCandidate struct {
+	Index      int
+	Definition lens.Definition
+	Tree       worktree.Tree
+	Artifact   candidate.Artifact
+}
+
 func Execute(ctx context.Context, opts Options) (Result, error) {
 	if strings.TrimSpace(opts.RunID) == "" {
 		return Result{}, fmt.Errorf("run id is required")
@@ -71,18 +79,35 @@ func Execute(ctx context.Context, opts Options) (Result, error) {
 		RunID:        opts.RunID,
 		OutDir:       opts.OutDir,
 		WorktreeRoot: manager.RootDir(),
-		Candidates:   make([]CandidateResult, 0, len(lens.All())),
+		Candidates:   make([]CandidateResult, len(lens.All())),
 	}
 
-	var writeErrors []error
-	for _, definition := range lens.All() {
-		result.Candidates = append(result.Candidates, executeCandidate(ctx, opts, manager, runner, definition))
-		last := result.Candidates[len(result.Candidates)-1]
-		if last.Error != "" && last.ArtifactPath == "" {
-			writeErrors = append(writeErrors, fmt.Errorf("%s: %s", definition.ID, last.Error))
+	var prepared []preparedCandidate
+	for i, definition := range lens.All() {
+		artifact := candidate.New(opts.RunID, definition, "")
+		candidateResult := CandidateResult{
+			LensID:   definition.ID,
+			Artifact: artifact,
 		}
+
+		tree, err := manager.Create(ctx, definition)
+		if err != nil {
+			artifact.MarkFailed(err)
+			result.Candidates[i] = writeCandidate(opts.OutDir, artifact, candidateResult)
+			continue
+		}
+		artifact.WorktreePath = tree.Path
+		prepared = append(prepared, preparedCandidate{
+			Index:      i,
+			Definition: definition,
+			Tree:       tree,
+			Artifact:   artifact,
+		})
 	}
 
+	executePreparedCandidates(ctx, opts, runner, prepared, result.Candidates)
+
+	writeErrors := collectWriteErrors(result.Candidates)
 	if err := manager.Cleanup(ctx); err != nil {
 		result.CleanupError = err.Error()
 		writeErrors = append(writeErrors, err)
@@ -98,19 +123,45 @@ func Execute(ctx context.Context, opts Options) (Result, error) {
 	return result, joinErrors(writeErrors)
 }
 
-func executeCandidate(ctx context.Context, opts Options, manager *worktree.Manager, runner agent.Runner, definition lens.Definition) CandidateResult {
-	artifact := candidate.New(opts.RunID, definition, "")
+func executePreparedCandidates(ctx context.Context, opts Options, runner agent.Runner, prepared []preparedCandidate, results []CandidateResult) {
+	type indexedResult struct {
+		index  int
+		result CandidateResult
+	}
+
+	ch := make(chan indexedResult, len(prepared))
+	var wg sync.WaitGroup
+	for _, candidate := range prepared {
+		candidate := candidate
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ch <- indexedResult{
+				index: candidate.Index,
+				result: executePreparedCandidate(
+					ctx,
+					opts,
+					runner,
+					candidate.Definition,
+					candidate.Tree,
+					candidate.Artifact,
+				),
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(ch)
+	for item := range ch {
+		results[item.index] = item.result
+	}
+}
+
+func executePreparedCandidate(ctx context.Context, opts Options, runner agent.Runner, definition lens.Definition, tree worktree.Tree, artifact candidate.Artifact) CandidateResult {
 	candidateResult := CandidateResult{
 		LensID:   definition.ID,
 		Artifact: artifact,
 	}
-
-	tree, err := manager.Create(ctx, definition)
-	if err != nil {
-		artifact.MarkFailed(err)
-		return writeCandidate(opts.OutDir, artifact, candidateResult)
-	}
-	artifact.WorktreePath = tree.Path
 
 	agentResult, err := runner.Run(ctx, agent.Input{
 		RunID:        opts.RunID,
@@ -141,6 +192,16 @@ func executeCandidate(ctx context.Context, opts Options, manager *worktree.Manag
 	artifact.SetValidation(validationResult)
 
 	return writeCandidate(opts.OutDir, artifact, candidateResult)
+}
+
+func collectWriteErrors(results []CandidateResult) []error {
+	var writeErrors []error
+	for _, result := range results {
+		if result.Error != "" && result.ArtifactPath == "" {
+			writeErrors = append(writeErrors, fmt.Errorf("%s: %s", result.LensID, result.Error))
+		}
+	}
+	return writeErrors
 }
 
 func writeCandidate(outDir string, artifact candidate.Artifact, result CandidateResult) CandidateResult {
