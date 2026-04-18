@@ -2,3 +2,8 @@
 bin/
 dist/
 coverage.out
+out/
+.DS_Store
+issue.json
+workpackage.md
+todo.md
