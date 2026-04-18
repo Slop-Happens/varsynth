@@ -90,7 +90,14 @@ Optional Codex settings:
 
 - `--codex-command` overrides the Codex CLI executable path.
 - `--codex-model` passes a model override to `codex exec`.
+- `--codex-full-auto=false` disables Codex full-auto mode and uses an
+  explicit `workspace-write` sandbox instead.
 - `--agent-timeout` sets a per-candidate agent timeout, for example `10m`.
+
+By default, `--agent codex` invokes `codex exec --full-auto` for each candidate
+worktree. This avoids interactive approvals while keeping execution sandboxed to
+the worktree. Commands that need network access or writes outside the worktree
+should still fail instead of blocking for manual approval.
 
 ## Expected Output
 

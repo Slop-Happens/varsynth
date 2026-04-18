@@ -150,9 +150,10 @@ func agentRunnerFromConfig(cfg config.Config) agent.Runner {
 	}
 	return agent.BackendRunner{
 		Backend: agent.CodexBackend{
-			Command: cfg.CodexCommand,
-			Model:   cfg.CodexModel,
-			Timeout: cfg.AgentTimeout,
+			Command:  cfg.CodexCommand,
+			Model:    cfg.CodexModel,
+			FullAuto: cfg.CodexFullAuto,
+			Timeout:  cfg.AgentTimeout,
 		},
 	}
 }

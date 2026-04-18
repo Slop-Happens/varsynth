@@ -114,6 +114,7 @@ func (Stub) Run(ctx context.Context, input Input) (Result, error) {
 type CodexBackend struct {
 	Command     string
 	Model       string
+	FullAuto    bool
 	Timeout     time.Duration
 	ExtraArgs   []string
 	MaxLogBytes int
@@ -149,18 +150,7 @@ func (backend CodexBackend) Run(ctx context.Context, request Request) (Response,
 	}
 	defer os.Remove(lastMessagePath)
 
-	args := []string{
-		"exec",
-		"--cd", request.WorktreePath,
-		"--sandbox", "workspace-write",
-		"--skip-git-repo-check",
-		"--output-last-message", lastMessagePath,
-	}
-	if backend.Model != "" {
-		args = append(args, "--model", backend.Model)
-	}
-	args = append(args, backend.ExtraArgs...)
-	args = append(args, "-")
+	args := backend.args(request.WorktreePath, lastMessagePath)
 
 	command := strings.TrimSpace(backend.Command)
 	if command == "" {
@@ -203,6 +193,27 @@ func (backend CodexBackend) Run(ctx context.Context, request Request) (Response,
 		return response, fmt.Errorf("read codex final response: %w", readErr)
 	}
 	return response, nil
+}
+
+func (backend CodexBackend) args(worktreePath, lastMessagePath string) []string {
+	args := []string{
+		"exec",
+		"--cd", worktreePath,
+	}
+	if backend.FullAuto {
+		args = append(args, "--full-auto")
+	} else {
+		args = append(args, "--sandbox", "workspace-write")
+	}
+	args = append(args,
+		"--skip-git-repo-check",
+		"--output-last-message", lastMessagePath,
+	)
+	if backend.Model != "" {
+		args = append(args, "--model", backend.Model)
+	}
+	args = append(args, backend.ExtraArgs...)
+	return append(args, "-")
 }
 
 func ParseFinalResponse(text string) (string, string) {

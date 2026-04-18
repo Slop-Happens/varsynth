@@ -181,6 +181,34 @@ func TestParseFinalResponse(t *testing.T) {
 	}
 }
 
+func TestCodexBackendArgsUseFullAutoByDefault(t *testing.T) {
+	args := CodexBackend{
+		Model:    "gpt-5.4",
+		FullAuto: true,
+	}.args("/tmp/worktree", "/tmp/last.md")
+
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"exec", "--cd /tmp/worktree", "--full-auto", "--skip-git-repo-check", "--output-last-message /tmp/last.md", "--model gpt-5.4"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("args %q missing %q", joined, want)
+		}
+	}
+	if strings.Contains(joined, "--sandbox workspace-write") {
+		t.Fatalf("args %q should not include explicit sandbox when full-auto is enabled", joined)
+	}
+}
+
+func TestCodexBackendArgsCanDisableFullAuto(t *testing.T) {
+	args := CodexBackend{}.args("/tmp/worktree", "/tmp/last.md")
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "--full-auto") {
+		t.Fatalf("args %q should not include --full-auto", joined)
+	}
+	if !strings.Contains(joined, "--sandbox workspace-write") {
+		t.Fatalf("args %q missing workspace sandbox", joined)
+	}
+}
+
 type recordingBackend struct {
 	request  Request
 	response Response

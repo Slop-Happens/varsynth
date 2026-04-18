@@ -25,6 +25,7 @@ type Config struct {
 	AgentMode         string
 	CodexCommand      string
 	CodexModel        string
+	CodexFullAuto     bool
 	AgentTimeout      time.Duration
 }
 
@@ -43,6 +44,7 @@ func Parse(args []string, stderr io.Writer) (Config, error) {
 	fs.StringVar(&cfg.AgentMode, "agent", AgentStub, "Candidate agent backend: stub or codex")
 	fs.StringVar(&cfg.CodexCommand, "codex-command", "codex", "Codex CLI command used when --agent codex")
 	fs.StringVar(&cfg.CodexModel, "codex-model", "", "Codex model override used when --agent codex")
+	fs.BoolVar(&cfg.CodexFullAuto, "codex-full-auto", true, "Run Codex in full-auto sandboxed mode when --agent codex")
 	fs.DurationVar(&cfg.AgentTimeout, "agent-timeout", 0, "Optional timeout for each agent run, for example 10m")
 
 	if err := fs.Parse(args); err != nil {
