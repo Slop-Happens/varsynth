@@ -12,6 +12,7 @@ import (
 
 	"github.com/Slop-Happens/varsynth/internal/agent"
 	"github.com/Slop-Happens/varsynth/internal/candidate"
+	"github.com/Slop-Happens/varsynth/internal/evaluation"
 	"github.com/Slop-Happens/varsynth/internal/lens"
 	"github.com/Slop-Happens/varsynth/internal/prompt"
 	"github.com/Slop-Happens/varsynth/internal/report"
@@ -36,16 +37,23 @@ type Options struct {
 	AgentRetryDelay       time.Duration
 	PromptContext         prompt.Context
 	Agent                 agent.Runner
+	SelectCandidate       string
+	CriticMode            string
+	FinalPatch            string
+	Critic                evaluation.Critic
 }
 
 type Result struct {
-	RunID         string
-	OutDir        string
-	WorktreeRoot  string
-	ReportPath    string
-	RunEventsPath string
-	Candidates    []CandidateResult
-	CleanupError  string
+	RunID          string
+	OutDir         string
+	WorktreeRoot   string
+	ReportPath     string
+	RunEventsPath  string
+	EvaluationPath string
+	FinalPatchPath string
+	Candidates     []CandidateResult
+	CleanupError   string
+	Evaluation     evaluation.Result
 }
 
 type CandidateResult struct {
@@ -127,6 +135,22 @@ func Execute(ctx context.Context, opts Options) (Result, error) {
 		writeErrors = append(writeErrors, err)
 	}
 
+	evaluationResult, err := evaluation.Evaluate(ctx, evaluation.Options{
+		RunID:      opts.RunID,
+		OutDir:     opts.OutDir,
+		Selector:   opts.SelectCandidate,
+		CriticMode: opts.CriticMode,
+		FinalPatch: opts.FinalPatch,
+		Critic:     opts.Critic,
+	}, buildEvaluationInputs(result.Candidates))
+	if err != nil {
+		writeErrors = append(writeErrors, err)
+	} else {
+		result.Evaluation = evaluationResult
+		result.EvaluationPath = evaluation.Path(opts.OutDir)
+		result.FinalPatchPath = evaluationResult.FinalPatchPath
+	}
+
 	reportPath, err := report.Write(opts.OutDir, buildReport(opts, result))
 	if err != nil {
 		writeErrors = append(writeErrors, err)
@@ -135,6 +159,18 @@ func Execute(ctx context.Context, opts Options) (Result, error) {
 	}
 
 	return result, joinErrors(writeErrors)
+}
+
+func buildEvaluationInputs(results []CandidateResult) []evaluation.Input {
+	inputs := make([]evaluation.Input, 0, len(results))
+	for _, result := range results {
+		inputs = append(inputs, evaluation.Input{
+			ArtifactPath: result.ArtifactPath,
+			Artifact:     result.Artifact,
+			Error:        result.Error,
+		})
+	}
+	return inputs
 }
 
 func executePreparedCandidates(ctx context.Context, opts Options, runner agent.Runner, prepared []preparedCandidate, results []CandidateResult, events *eventRecorder) {
@@ -374,15 +410,24 @@ func writeCandidate(outDir string, artifact candidate.Artifact, result Candidate
 
 func buildReport(opts Options, result Result) report.Summary {
 	summary := report.Summary{
-		RunID:         opts.RunID,
-		RepoRoot:      opts.RepoRoot,
-		BaseCommit:    opts.BaseCommit,
-		TestCommand:   opts.TestCommand,
-		OutDir:        opts.OutDir,
-		WorktreeRoot:  result.WorktreeRoot,
-		RunEventsPath: result.RunEventsPath,
-		CleanupError:  result.CleanupError,
-		Candidates:    make([]report.CandidateSummary, 0, len(result.Candidates)),
+		RunID:          opts.RunID,
+		RepoRoot:       opts.RepoRoot,
+		BaseCommit:     opts.BaseCommit,
+		TestCommand:    opts.TestCommand,
+		OutDir:         opts.OutDir,
+		WorktreeRoot:   result.WorktreeRoot,
+		RunEventsPath:  result.RunEventsPath,
+		EvaluationPath: result.EvaluationPath,
+		FinalPatchPath: result.FinalPatchPath,
+		CleanupError:   result.CleanupError,
+		Candidates:     make([]report.CandidateSummary, 0, len(result.Candidates)),
+	}
+	if result.Evaluation.ViableCandidateFound {
+		summary.SelectedCandidate = &report.SelectedCandidate{
+			LensID:       result.Evaluation.SelectedLensID,
+			ArtifactPath: result.Evaluation.SelectedArtifactPath,
+			Rationale:    result.Evaluation.SelectionRationale,
+		}
 	}
 	for _, candidateResult := range result.Candidates {
 		summary.Candidates = append(summary.Candidates, report.FromArtifact(

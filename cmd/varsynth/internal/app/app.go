@@ -71,8 +71,14 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		countValidationStatus(runResult.Candidates, candidate.ValidationTimedOut),
 		countValidationStatus(runResult.Candidates, candidate.ValidationNotRun),
 	)
+	fmt.Fprintf(stdout, "Evaluation: %s\n", runResult.EvaluationPath)
 	fmt.Fprintf(stdout, "Report: %s\n", runResult.ReportPath)
 	fmt.Fprintf(stdout, "Run events: %s\n", runResult.RunEventsPath)
+	if runResult.FinalPatchPath != "" {
+		fmt.Fprintf(stdout, "Final patch: %s\n", runResult.FinalPatchPath)
+	} else {
+		fmt.Fprintln(stdout, "Final patch: none")
+	}
 	if cfg.PreserveWorktrees {
 		fmt.Fprintf(stdout, "Worktrees: preserved at %s\n", runResult.WorktreeRoot)
 	} else {
@@ -99,6 +105,9 @@ func runOptionsFromBundle(cfg config.Config, bundle ctxbundle.Bundle) runpkg.Opt
 		AgentRetryDelay:   cfg.AgentRetryDelay,
 		PromptContext:     promptContextFromBundle(bundle),
 		Agent:             agentRunnerFromConfig(cfg),
+		SelectCandidate:   cfg.SelectCandidate,
+		CriticMode:        cfg.CriticMode,
+		FinalPatch:        cfg.FinalPatch,
 	}
 }
 

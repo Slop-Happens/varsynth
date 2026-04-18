@@ -44,6 +44,12 @@ func TestExecuteCreatesCandidateArtifacts(t *testing.T) {
 	if result.ReportPath != reportpkg.Path(outDir) {
 		t.Fatalf("ReportPath = %q, want %q", result.ReportPath, reportpkg.Path(outDir))
 	}
+	if result.EvaluationPath != filepath.Join(outDir, "evaluation.json") {
+		t.Fatalf("EvaluationPath = %q", result.EvaluationPath)
+	}
+	if result.FinalPatchPath != "" {
+		t.Fatalf("FinalPatchPath = %q, want empty for stub candidates", result.FinalPatchPath)
+	}
 
 	report := readReport(t, result.ReportPath)
 	if report.RunID != "run-1" {
@@ -60,6 +66,29 @@ func TestExecuteCreatesCandidateArtifacts(t *testing.T) {
 	}
 	if len(report.Candidates) != len(definitions) {
 		t.Fatalf("report has %d candidates, want %d", len(report.Candidates), len(definitions))
+	}
+	if report.EvaluationPath != filepath.Join(outDir, "evaluation.json") {
+		t.Fatalf("report EvaluationPath = %q", report.EvaluationPath)
+	}
+	if report.SelectedCandidate != nil {
+		t.Fatalf("report SelectedCandidate = %#v, want nil", report.SelectedCandidate)
+	}
+
+	evaluationPayload, err := os.ReadFile(filepath.Join(outDir, "evaluation.json"))
+	if err != nil {
+		t.Fatalf("read evaluation.json: %v", err)
+	}
+	var evaluation struct {
+		ViableCandidateFound bool `json:"viable_candidate_found"`
+	}
+	if err := json.Unmarshal(evaluationPayload, &evaluation); err != nil {
+		t.Fatalf("unmarshal evaluation.json: %v", err)
+	}
+	if evaluation.ViableCandidateFound {
+		t.Fatal("ViableCandidateFound = true, want false for empty-diff stub candidates")
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "final.patch")); !os.IsNotExist(err) {
+		t.Fatalf("final.patch should not exist for non-viable stub candidates: %v", err)
 	}
 
 	for _, definition := range definitions {
@@ -440,6 +469,36 @@ func TestExecuteIsolatesCandidateAgentFailure(t *testing.T) {
 	}
 	if performanceSummary.ValidationExit == nil || *performanceSummary.ValidationExit != 0 {
 		t.Fatalf("performance report ValidationExit = %v, want 0", performanceSummary.ValidationExit)
+	}
+	if report.SelectedCandidate == nil {
+		t.Fatal("report SelectedCandidate = nil, want selected performance candidate")
+	}
+	if report.SelectedCandidate.LensID != lens.Performance {
+		t.Fatalf("report SelectedCandidate.LensID = %q, want %q", report.SelectedCandidate.LensID, lens.Performance)
+	}
+	if report.FinalPatchPath != filepath.Join(outDir, "final.patch") {
+		t.Fatalf("report FinalPatchPath = %q", report.FinalPatchPath)
+	}
+	patch, err := os.ReadFile(filepath.Join(outDir, "final.patch"))
+	if err != nil {
+		t.Fatalf("read final.patch: %v", err)
+	}
+	if string(patch) != performance.Diff {
+		t.Fatalf("final.patch does not match selected candidate diff:\n%s", string(patch))
+	}
+
+	evaluationPayload, err := os.ReadFile(filepath.Join(outDir, "evaluation.json"))
+	if err != nil {
+		t.Fatalf("read evaluation.json: %v", err)
+	}
+	var evaluation struct {
+		SelectedLensID string `json:"selected_lens_id"`
+	}
+	if err := json.Unmarshal(evaluationPayload, &evaluation); err != nil {
+		t.Fatalf("unmarshal evaluation.json: %v", err)
+	}
+	if evaluation.SelectedLensID != string(lens.Performance) {
+		t.Fatalf("evaluation selected lens = %q, want %q", evaluation.SelectedLensID, lens.Performance)
 	}
 }
 

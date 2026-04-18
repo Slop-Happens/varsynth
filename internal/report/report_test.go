@@ -79,12 +79,19 @@ func TestFromArtifactPrefersWriteError(t *testing.T) {
 func TestWritePersistsReportJSON(t *testing.T) {
 	outDir := t.TempDir()
 	summary := Summary{
-		RunID:        "run-1",
-		RepoRoot:     "/repo",
-		BaseCommit:   "abc123",
-		TestCommand:  "make test",
-		OutDir:       outDir,
-		WorktreeRoot: "/worktrees",
+		RunID:          "run-1",
+		RepoRoot:       "/repo",
+		BaseCommit:     "abc123",
+		TestCommand:    "make test",
+		OutDir:         outDir,
+		WorktreeRoot:   "/worktrees",
+		EvaluationPath: filepath.Join(outDir, "evaluation.json"),
+		FinalPatchPath: filepath.Join(outDir, "final.patch"),
+		SelectedCandidate: &SelectedCandidate{
+			LensID:       lens.Defensive,
+			ArtifactPath: filepath.Join(outDir, "candidates", "defensive.json"),
+			Rationale:    "selected defensive candidate",
+		},
 		Candidates: []CandidateSummary{
 			{
 				LensID:           lens.Defensive,
@@ -125,6 +132,9 @@ func TestWritePersistsReportJSON(t *testing.T) {
 	}
 	if got.RunID != "run-1" {
 		t.Fatalf("RunID = %q, want run-1", got.RunID)
+	}
+	if got.SelectedCandidate == nil || got.SelectedCandidate.LensID != lens.Defensive {
+		t.Fatalf("SelectedCandidate = %#v, want defensive", got.SelectedCandidate)
 	}
 	if len(got.Candidates) != 1 {
 		t.Fatalf("len(Candidates) = %d, want 1", len(got.Candidates))

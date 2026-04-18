@@ -30,6 +30,9 @@ type Config struct {
 	AgentConcurrency  int
 	AgentRetries      int
 	AgentRetryDelay   time.Duration
+	SelectCandidate   string
+	CriticMode        string
+	FinalPatch        string
 }
 
 // Parse converts CLI arguments into a validated config and normalizes path-like fields.
@@ -42,6 +45,9 @@ func Parse(args []string, stderr io.Writer) (Config, error) {
 	fs.StringVar(&cfg.IssueFile, "issue-file", "", "Path to the normalized issue JSON file")
 	fs.StringVar(&cfg.TestCommand, "test-command", "", "Command used to validate candidate runs")
 	fs.StringVar(&cfg.OutDir, "out", "", "Directory for generated artifacts")
+	fs.StringVar(&cfg.SelectCandidate, "select-candidate", "deterministic", "Candidate selection strategy: deterministic or off")
+	fs.StringVar(&cfg.CriticMode, "critic", "off", "Critic mode: off, stub, or codex")
+	fs.StringVar(&cfg.FinalPatch, "final-patch", "", "Path for the selected final patch artifact (defaults to <out>/final.patch)")
 	fs.BoolVar(&cfg.DryRun, "dry-run", false, "Execute the bootstrap pipeline without downstream actions")
 	fs.BoolVar(&cfg.PreserveWorktrees, "preserve-worktrees", false, "Keep candidate worktrees on disk after the run completes")
 	fs.StringVar(&cfg.AgentMode, "agent", AgentStub, "Candidate agent backend: stub or codex")
@@ -107,6 +113,14 @@ func (c Config) Validate() error {
 	}
 	if c.AgentRetryDelay < 0 {
 		errs = append(errs, errors.New("--agent-retry-delay must be greater than or equal to 0"))
+	}
+	if c.SelectCandidate != "deterministic" && c.SelectCandidate != "off" {
+		errs = append(errs, fmt.Errorf("--select-candidate must be deterministic or off"))
+	}
+	switch c.CriticMode {
+	case "off", "stub", "codex":
+	default:
+		errs = append(errs, fmt.Errorf("--critic must be off, stub, or codex"))
 	}
 
 	return errors.Join(errs...)

@@ -112,6 +112,12 @@ func TestRunCreatesContextBundle(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(outDir, "prompts")); !os.IsNotExist(err) {
 		t.Fatalf("prompts dir should not exist in dry-run mode: %v", err)
 	}
+	if _, err := os.Stat(filepath.Join(outDir, "evaluation.json")); !os.IsNotExist(err) {
+		t.Fatalf("evaluation.json should not exist in dry-run mode: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "final.patch")); !os.IsNotExist(err) {
+		t.Fatalf("final.patch should not exist in dry-run mode: %v", err)
+	}
 }
 
 func TestRunExecutesCandidatePipeline(t *testing.T) {
@@ -238,6 +244,19 @@ func TestRunExecutesCandidatePipeline(t *testing.T) {
 	if len(summary.Candidates) != len(lens.All()) {
 		t.Fatalf("report candidate count = %d, want %d", len(summary.Candidates), len(lens.All()))
 	}
+	if summary.EvaluationPath != filepath.Join(outDir, "evaluation.json") {
+		t.Fatalf("report EvaluationPath = %q", summary.EvaluationPath)
+	}
+	if summary.SelectedCandidate != nil {
+		t.Fatalf("report SelectedCandidate = %#v, want nil for stub candidates", summary.SelectedCandidate)
+	}
+
+	if _, err := os.Stat(filepath.Join(outDir, "evaluation.json")); err != nil {
+		t.Fatalf("evaluation.json missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "final.patch")); !os.IsNotExist(err) {
+		t.Fatalf("final.patch should not exist for stub candidates: %v", err)
+	}
 
 	if !strings.Contains(stdout.String(), "Candidate artifacts: 4") {
 		t.Fatalf("stdout missing candidate artifact count: %s", stdout.String())
@@ -251,8 +270,14 @@ func TestRunExecutesCandidatePipeline(t *testing.T) {
 	if !strings.Contains(stdout.String(), "Validation: passed=4 failed=0 timed_out=0 not_run=0") {
 		t.Fatalf("stdout missing validation summary: %s", stdout.String())
 	}
+	if !strings.Contains(stdout.String(), "Evaluation: "+filepath.Join(outDir, "evaluation.json")) {
+		t.Fatalf("stdout missing evaluation path: %s", stdout.String())
+	}
 	if !strings.Contains(stdout.String(), "Report: "+reportpkg.Path(outDir)) {
 		t.Fatalf("stdout missing report path: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Final patch: none") {
+		t.Fatalf("stdout missing final patch summary: %s", stdout.String())
 	}
 	if !strings.Contains(stdout.String(), "Worktrees: preserved at "+filepath.Join(outDir, "worktrees")) {
 		t.Fatalf("stdout missing worktree summary: %s", stdout.String())

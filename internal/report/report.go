@@ -12,15 +12,24 @@ import (
 )
 
 type Summary struct {
-	RunID         string             `json:"run_id"`
-	RepoRoot      string             `json:"repo_root"`
-	BaseCommit    string             `json:"base_commit"`
-	TestCommand   string             `json:"test_command"`
-	OutDir        string             `json:"out_dir"`
-	WorktreeRoot  string             `json:"worktree_root"`
-	RunEventsPath string             `json:"run_events_path,omitempty"`
-	Candidates    []CandidateSummary `json:"candidates"`
-	CleanupError  string             `json:"cleanup_error,omitempty"`
+	RunID             string             `json:"run_id"`
+	RepoRoot          string             `json:"repo_root"`
+	BaseCommit        string             `json:"base_commit"`
+	TestCommand       string             `json:"test_command"`
+	OutDir            string             `json:"out_dir"`
+	WorktreeRoot      string             `json:"worktree_root"`
+	RunEventsPath     string             `json:"run_events_path,omitempty"`
+	Candidates        []CandidateSummary `json:"candidates"`
+	EvaluationPath    string             `json:"evaluation_path,omitempty"`
+	FinalPatchPath    string             `json:"final_patch_path,omitempty"`
+	SelectedCandidate *SelectedCandidate `json:"selected_candidate,omitempty"`
+	CleanupError      string             `json:"cleanup_error,omitempty"`
+}
+
+type SelectedCandidate struct {
+	LensID       lens.ID `json:"lens_id"`
+	ArtifactPath string  `json:"artifact_path,omitempty"`
+	Rationale    string  `json:"rationale"`
 }
 
 type CandidateSummary struct {
@@ -110,7 +119,13 @@ func Write(outDir string, summary Summary) (string, error) {
 func sanitizedSummary(summary Summary) Summary {
 	summary.TestCommand = sanitize.Secrets(summary.TestCommand)
 	summary.RunEventsPath = sanitize.Secrets(summary.RunEventsPath)
+	summary.EvaluationPath = sanitize.Secrets(summary.EvaluationPath)
+	summary.FinalPatchPath = sanitize.Secrets(summary.FinalPatchPath)
 	summary.CleanupError = sanitize.Secrets(summary.CleanupError)
+	if summary.SelectedCandidate != nil {
+		summary.SelectedCandidate.ArtifactPath = sanitize.Secrets(summary.SelectedCandidate.ArtifactPath)
+		summary.SelectedCandidate.Rationale = sanitize.Secrets(summary.SelectedCandidate.Rationale)
+	}
 	for idx := range summary.Candidates {
 		summary.Candidates[idx].Error = sanitize.Secrets(summary.Candidates[idx].Error)
 		summary.Candidates[idx].AgentLogDir = sanitize.Secrets(summary.Candidates[idx].AgentLogDir)
