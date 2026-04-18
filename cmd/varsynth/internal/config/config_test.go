@@ -26,6 +26,9 @@ func TestParseAgentDefaultsToStub(t *testing.T) {
 	if !cfg.CodexFullAuto {
 		t.Fatal("CodexFullAuto = false, want true")
 	}
+	if !cfg.AgentStream {
+		t.Fatal("AgentStream = false, want true")
+	}
 }
 
 func TestParseCodexAgentOptions(t *testing.T) {
@@ -38,6 +41,7 @@ func TestParseCodexAgentOptions(t *testing.T) {
 		"--codex-command", "/bin/codex",
 		"--codex-model", "gpt-5.4",
 		"--codex-full-auto=false",
+		"--agent-stream=false",
 		"--agent-timeout", "10m",
 		"--agent-concurrency", "1",
 		"--agent-retries", "2",
@@ -58,6 +62,9 @@ func TestParseCodexAgentOptions(t *testing.T) {
 	}
 	if cfg.CodexFullAuto {
 		t.Fatal("CodexFullAuto = true, want false")
+	}
+	if cfg.AgentStream {
+		t.Fatal("AgentStream = true, want false")
 	}
 	if cfg.AgentTimeout != 10*time.Minute {
 		t.Fatalf("AgentTimeout = %s, want 10m", cfg.AgentTimeout)

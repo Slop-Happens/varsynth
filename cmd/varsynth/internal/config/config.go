@@ -26,6 +26,7 @@ type Config struct {
 	CodexCommand      string
 	CodexModel        string
 	CodexFullAuto     bool
+	AgentStream       bool
 	AgentTimeout      time.Duration
 	AgentConcurrency  int
 	AgentRetries      int
@@ -54,6 +55,7 @@ func Parse(args []string, stderr io.Writer) (Config, error) {
 	fs.StringVar(&cfg.CodexCommand, "codex-command", "codex", "Codex CLI command used when --agent codex")
 	fs.StringVar(&cfg.CodexModel, "codex-model", "", "Codex model override used when --agent codex")
 	fs.BoolVar(&cfg.CodexFullAuto, "codex-full-auto", true, "Run Codex in full-auto sandboxed mode when --agent codex")
+	fs.BoolVar(&cfg.AgentStream, "agent-stream", true, "Stream Codex agent output to stderr with colored lens prefixes")
 	fs.DurationVar(&cfg.AgentTimeout, "agent-timeout", 0, "Optional timeout for each agent run, for example 10m")
 	fs.IntVar(&cfg.AgentConcurrency, "agent-concurrency", 0, "Maximum concurrent agent runs; 0 runs all lenses concurrently")
 	fs.IntVar(&cfg.AgentRetries, "agent-retries", 0, "Number of retries after an agent/backend failure")

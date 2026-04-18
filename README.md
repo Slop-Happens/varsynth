@@ -93,6 +93,7 @@ Optional Codex settings:
 - `--codex-full-auto=false` disables Codex full-auto mode and uses an
   explicit `workspace-write` sandbox instead.
 - `--agent-timeout` sets a per-candidate agent timeout, for example `10m`.
+- `--agent-stream=false` disables live colored Codex output streaming.
 - `--agent-concurrency` caps concurrent agent runs. The default `0` keeps all
   lenses running concurrently for demo speed.
 - `--agent-retries` retries transient agent/backend failures before recording a

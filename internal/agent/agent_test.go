@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"strings"
@@ -227,6 +228,25 @@ func TestCodexBackendArgsCanDisableFullAuto(t *testing.T) {
 	}
 	if !strings.Contains(joined, "--sandbox workspace-write") {
 		t.Fatalf("args %q missing workspace sandbox", joined)
+	}
+}
+
+func TestColoredLineWriterPrefixesAndColors(t *testing.T) {
+	var output bytes.Buffer
+	writer := newColoredLineWriter(&output, lens.Defensive)
+
+	_, err := writer.Write([]byte("first\nsecond"))
+	if err != nil {
+		t.Fatalf("Write() returned error: %v", err)
+	}
+	writer.Flush()
+
+	text := output.String()
+	if !strings.Contains(text, "\x1b[36m[defensive]\x1b[0m first\n") {
+		t.Fatalf("stream output missing colored first line: %q", text)
+	}
+	if !strings.Contains(text, "\x1b[36m[defensive]\x1b[0m second\n") {
+		t.Fatalf("stream output missing flushed second line: %q", text)
 	}
 }
 

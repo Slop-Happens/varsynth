@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Slop-Happens/varsynth/internal/lens"
@@ -139,12 +141,14 @@ func (Stub) Run(ctx context.Context, input Input) (Result, error) {
 }
 
 type CodexBackend struct {
-	Command     string
-	Model       string
-	FullAuto    bool
-	Timeout     time.Duration
-	ExtraArgs   []string
-	MaxLogBytes int
+	Command      string
+	Model        string
+	FullAuto     bool
+	Timeout      time.Duration
+	ExtraArgs    []string
+	MaxLogBytes  int
+	StreamLogs   bool
+	StreamWriter io.Writer
 }
 
 func (backend CodexBackend) Name() string {
@@ -195,10 +199,29 @@ func (backend CodexBackend) Run(ctx context.Context, request Request) (Response,
 	cmd := exec.CommandContext(runCtx, command, args...)
 	cmd.Dir = request.WorktreePath
 	cmd.Stdin = strings.NewReader(request.Prompt)
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+
+	var stdoutStream, stderrStream *coloredLineWriter
+	if backend.StreamLogs {
+		streamWriter := backend.StreamWriter
+		if streamWriter == nil {
+			streamWriter = os.Stderr
+		}
+		stdoutStream = newColoredLineWriter(streamWriter, request.Lens.ID)
+		stderrStream = newColoredLineWriter(streamWriter, request.Lens.ID)
+		cmd.Stdout = io.MultiWriter(&stdout, stdoutStream)
+		cmd.Stderr = io.MultiWriter(&stderr, stderrStream)
+	} else {
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+	}
 
 	err = cmd.Run()
+	if stdoutStream != nil {
+		stdoutStream.Flush()
+	}
+	if stderrStream != nil {
+		stderrStream.Flush()
+	}
 	maxLogBytes := backend.MaxLogBytes
 	if maxLogBytes <= 0 {
 		maxLogBytes = DefaultMaxLogBytes
@@ -397,6 +420,75 @@ func validateRequest(request Request) error {
 		return fmt.Errorf("agent prompt is required")
 	}
 	return nil
+}
+
+var streamMu sync.Mutex
+
+type coloredLineWriter struct {
+	w      io.Writer
+	lensID lens.ID
+	color  string
+	buf    strings.Builder
+}
+
+func newColoredLineWriter(w io.Writer, lensID lens.ID) *coloredLineWriter {
+	return &coloredLineWriter{
+		w:      w,
+		lensID: lensID,
+		color:  lensColor(lensID),
+	}
+}
+
+func (writer *coloredLineWriter) Write(p []byte) (int, error) {
+	written := len(p)
+	for len(p) > 0 {
+		breakAt := bytes.IndexAny(p, "\r\n")
+		if breakAt < 0 {
+			_, _ = writer.buf.Write(p)
+			return written, nil
+		}
+		delimiter := p[breakAt]
+		_, _ = writer.buf.Write(p[:breakAt])
+		writer.writeLine()
+		p = p[breakAt+1:]
+		if delimiter == '\r' && len(p) > 0 && p[0] == '\n' {
+			p = p[1:]
+		}
+	}
+	return written, nil
+}
+
+func (writer *coloredLineWriter) Flush() {
+	if writer == nil || writer.buf.Len() == 0 {
+		return
+	}
+	writer.writeLine()
+}
+
+func (writer *coloredLineWriter) writeLine() {
+	line := strings.TrimSuffix(writer.buf.String(), "\r")
+	writer.buf.Reset()
+
+	streamMu.Lock()
+	defer streamMu.Unlock()
+	_, _ = fmt.Fprintf(writer.w, "%s[%s]\x1b[0m %s\n", writer.color, writer.lensID, sanitize.Secrets(line))
+}
+
+func lensColor(id lens.ID) string {
+	switch id {
+	case lens.Defensive:
+		return "\x1b[36m"
+	case lens.Minimalist:
+		return "\x1b[32m"
+	case lens.Architect:
+		return "\x1b[33m"
+	case lens.Performance:
+		return "\x1b[34m"
+	case lens.ID("final"):
+		return "\x1b[35m"
+	default:
+		return "\x1b[37m"
+	}
 }
 
 func fencedJSON(text string) string {

@@ -61,7 +61,7 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		return nil
 	}
 
-	runResult, runErr := runpkg.Execute(context.Background(), runOptionsFromBundle(cfg, bundle))
+	runResult, runErr := runpkg.Execute(context.Background(), runOptionsFromBundle(cfg, bundle, stderr))
 
 	fmt.Fprintf(stdout, "Agent: %s\n", cfg.AgentMode)
 	fmt.Fprintf(stdout, "Prompt artifacts: %d\n", countPromptArtifacts(runResult.Candidates))
@@ -92,7 +92,7 @@ func Run(args []string, stdout, stderr io.Writer) error {
 	return runErr
 }
 
-func runOptionsFromBundle(cfg config.Config, bundle ctxbundle.Bundle) runpkg.Options {
+func runOptionsFromBundle(cfg config.Config, bundle ctxbundle.Bundle, stderr io.Writer) runpkg.Options {
 	return runpkg.Options{
 		RunID:             bundle.RunID,
 		RepoRoot:          bundle.RepoRoot,
@@ -105,7 +105,7 @@ func runOptionsFromBundle(cfg config.Config, bundle ctxbundle.Bundle) runpkg.Opt
 		AgentRetries:      cfg.AgentRetries,
 		AgentRetryDelay:   cfg.AgentRetryDelay,
 		PromptContext:     promptContextFromBundle(bundle),
-		Agent:             agentRunnerFromConfig(cfg),
+		Agent:             agentRunnerFromConfig(cfg, stderr),
 		SelectCandidate:   cfg.SelectCandidate,
 		CriticMode:        cfg.CriticMode,
 		FinalPatch:        cfg.FinalPatch,
@@ -159,16 +159,18 @@ func promptContextFromBundle(bundle ctxbundle.Bundle) prompt.Context {
 	return ctx
 }
 
-func agentRunnerFromConfig(cfg config.Config) agent.Runner {
+func agentRunnerFromConfig(cfg config.Config, stderr io.Writer) agent.Runner {
 	if cfg.AgentMode != config.AgentCodex {
 		return agent.Stub{}
 	}
 	return agent.BackendRunner{
 		Backend: agent.CodexBackend{
-			Command:  cfg.CodexCommand,
-			Model:    cfg.CodexModel,
-			FullAuto: cfg.CodexFullAuto,
-			Timeout:  cfg.AgentTimeout,
+			Command:      cfg.CodexCommand,
+			Model:        cfg.CodexModel,
+			FullAuto:     cfg.CodexFullAuto,
+			Timeout:      cfg.AgentTimeout,
+			StreamLogs:   cfg.AgentStream,
+			StreamWriter: stderr,
 		},
 	}
 }
