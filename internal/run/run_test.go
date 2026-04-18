@@ -13,6 +13,7 @@ import (
 	"github.com/Slop-Happens/varsynth/internal/agent"
 	"github.com/Slop-Happens/varsynth/internal/candidate"
 	"github.com/Slop-Happens/varsynth/internal/lens"
+	reportpkg "github.com/Slop-Happens/varsynth/internal/report"
 )
 
 func TestExecuteCreatesCandidateArtifacts(t *testing.T) {
@@ -36,6 +37,26 @@ func TestExecuteCreatesCandidateArtifacts(t *testing.T) {
 	definitions := lens.All()
 	if len(result.Candidates) != len(definitions) {
 		t.Fatalf("Execute() returned %d candidates, want %d", len(result.Candidates), len(definitions))
+	}
+	if result.ReportPath != reportpkg.Path(outDir) {
+		t.Fatalf("ReportPath = %q, want %q", result.ReportPath, reportpkg.Path(outDir))
+	}
+
+	report := readReport(t, result.ReportPath)
+	if report.RunID != "run-1" {
+		t.Fatalf("report RunID = %q, want run-1", report.RunID)
+	}
+	if report.RepoRoot != repoRoot {
+		t.Fatalf("report RepoRoot = %q, want %q", report.RepoRoot, repoRoot)
+	}
+	if report.BaseCommit != baseCommit {
+		t.Fatalf("report BaseCommit = %q, want %q", report.BaseCommit, baseCommit)
+	}
+	if report.TestCommand != "test -f app.txt" {
+		t.Fatalf("report TestCommand = %q, want test -f app.txt", report.TestCommand)
+	}
+	if len(report.Candidates) != len(definitions) {
+		t.Fatalf("report has %d candidates, want %d", len(report.Candidates), len(definitions))
 	}
 
 	for _, definition := range definitions {
@@ -175,6 +196,45 @@ func TestExecuteIsolatesCandidateAgentFailure(t *testing.T) {
 	if defensive.Status != candidate.StatusValidationPassed {
 		t.Fatalf("defensive Status = %q, want %q", defensive.Status, candidate.StatusValidationPassed)
 	}
+
+	report := readReport(t, result.ReportPath)
+	var minimalistSummary reportpkg.CandidateSummary
+	var performanceSummary reportpkg.CandidateSummary
+	for _, summary := range report.Candidates {
+		switch summary.LensID {
+		case lens.Minimalist:
+			minimalistSummary = summary
+		case lens.Performance:
+			performanceSummary = summary
+		}
+	}
+	if minimalistSummary.Status != candidate.StatusFailed {
+		t.Fatalf("minimalist report Status = %q, want %q", minimalistSummary.Status, candidate.StatusFailed)
+	}
+	if minimalistSummary.Error != "minimalist failed" {
+		t.Fatalf("minimalist report Error = %q, want minimalist failed", minimalistSummary.Error)
+	}
+	if performanceSummary.ChangedFileCount != 1 {
+		t.Fatalf("performance report ChangedFileCount = %d, want 1", performanceSummary.ChangedFileCount)
+	}
+	if performanceSummary.EmptyDiff {
+		t.Fatal("performance report EmptyDiff = true, want false")
+	}
+	if performanceSummary.DiffBytes == 0 {
+		t.Fatal("performance report DiffBytes = 0, want non-zero")
+	}
+	if !performanceSummary.RationalePresent {
+		t.Fatal("performance report RationalePresent = false, want true")
+	}
+	if !performanceSummary.RootCausePresent {
+		t.Fatal("performance report RootCausePresent = false, want true")
+	}
+	if performanceSummary.ValidationStatus != candidate.ValidationPassed {
+		t.Fatalf("performance report ValidationStatus = %q, want %q", performanceSummary.ValidationStatus, candidate.ValidationPassed)
+	}
+	if performanceSummary.ValidationExit == nil || *performanceSummary.ValidationExit != 0 {
+		t.Fatalf("performance report ValidationExit = %v, want 0", performanceSummary.ValidationExit)
+	}
 }
 
 func TestExecuteRequiresRunIDAndOutDir(t *testing.T) {
@@ -238,4 +298,19 @@ func readArtifact(t *testing.T, path string) candidate.Artifact {
 		t.Fatalf("Unmarshal(%s) returned error: %v", path, err)
 	}
 	return artifact
+}
+
+func readReport(t *testing.T, path string) reportpkg.Summary {
+	t.Helper()
+
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s) returned error: %v", path, err)
+	}
+
+	var summary reportpkg.Summary
+	if err := json.Unmarshal(payload, &summary); err != nil {
+		t.Fatalf("Unmarshal(%s) returned error: %v", path, err)
+	}
+	return summary
 }

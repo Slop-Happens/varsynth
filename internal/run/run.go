@@ -10,6 +10,7 @@ import (
 	"github.com/Slop-Happens/varsynth/internal/agent"
 	"github.com/Slop-Happens/varsynth/internal/candidate"
 	"github.com/Slop-Happens/varsynth/internal/lens"
+	"github.com/Slop-Happens/varsynth/internal/report"
 	"github.com/Slop-Happens/varsynth/internal/validation"
 	"github.com/Slop-Happens/varsynth/internal/worktree"
 )
@@ -31,6 +32,7 @@ type Result struct {
 	RunID        string
 	OutDir       string
 	WorktreeRoot string
+	ReportPath   string
 	Candidates   []CandidateResult
 	CleanupError string
 }
@@ -84,6 +86,13 @@ func Execute(ctx context.Context, opts Options) (Result, error) {
 	if err := manager.Cleanup(ctx); err != nil {
 		result.CleanupError = err.Error()
 		writeErrors = append(writeErrors, err)
+	}
+
+	reportPath, err := report.Write(opts.OutDir, buildReport(opts, result))
+	if err != nil {
+		writeErrors = append(writeErrors, err)
+	} else {
+		result.ReportPath = reportPath
 	}
 
 	return result, joinErrors(writeErrors)
@@ -144,6 +153,27 @@ func writeCandidate(outDir string, artifact candidate.Artifact, result Candidate
 	result.ArtifactPath = path
 	result.Artifact = artifact
 	return result
+}
+
+func buildReport(opts Options, result Result) report.Summary {
+	summary := report.Summary{
+		RunID:        opts.RunID,
+		RepoRoot:     opts.RepoRoot,
+		BaseCommit:   opts.BaseCommit,
+		TestCommand:  opts.TestCommand,
+		OutDir:       opts.OutDir,
+		WorktreeRoot: result.WorktreeRoot,
+		CleanupError: result.CleanupError,
+		Candidates:   make([]report.CandidateSummary, 0, len(result.Candidates)),
+	}
+	for _, candidateResult := range result.Candidates {
+		summary.Candidates = append(summary.Candidates, report.FromArtifact(
+			candidateResult.ArtifactPath,
+			candidateResult.Artifact,
+			candidateResult.Error,
+		))
+	}
+	return summary
 }
 
 func joinErrors(errs []error) error {
