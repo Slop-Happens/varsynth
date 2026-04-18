@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Slop-Happens/varsynth/internal/lens"
@@ -139,5 +140,35 @@ func TestWriteRejectsMissingLensID(t *testing.T) {
 	_, err := Write(t.TempDir(), Artifact{})
 	if err == nil {
 		t.Fatal("Write() returned nil error")
+	}
+}
+
+func TestWriteRedactsSecrets(t *testing.T) {
+	definition, ok := lens.Lookup(lens.Defensive)
+	if !ok {
+		t.Fatal("lens.Lookup(Defensive) returned false")
+	}
+	artifact := New("run-secret", definition, "/tmp/worktree")
+	artifact.Rationale = "used token=secret-token-value"
+	artifact.RootCause = "api_key: sk-secretvalue12345"
+	artifact.Diff = "+ password = hunter2\n"
+	artifact.Agent.Stdout = "Authorization: Bearer secretbearer"
+	artifact.Validation.Command = "echo token=command-secret"
+	artifact.Validation.Stderr = "SECRET=super-secret"
+
+	path, err := Write(t.TempDir(), artifact)
+	if err != nil {
+		t.Fatalf("Write() returned error: %v", err)
+	}
+
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() returned error: %v", err)
+	}
+	text := string(payload)
+	for _, leaked := range []string{"secret-token-value", "sk-secretvalue12345", "hunter2", "secretbearer", "command-secret", "super-secret"} {
+		if strings.Contains(text, leaked) {
+			t.Fatalf("candidate artifact leaked %q:\n%s", leaked, text)
+		}
 	}
 }

@@ -109,6 +109,9 @@ func TestRunCreatesContextBundle(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(outDir, "candidates")); !os.IsNotExist(err) {
 		t.Fatalf("candidates dir should not exist in dry-run mode: %v", err)
 	}
+	if _, err := os.Stat(filepath.Join(outDir, "prompts")); !os.IsNotExist(err) {
+		t.Fatalf("prompts dir should not exist in dry-run mode: %v", err)
+	}
 }
 
 func TestRunExecutesCandidatePipeline(t *testing.T) {
@@ -198,6 +201,23 @@ func TestRunExecutesCandidatePipeline(t *testing.T) {
 		if artifact.Validation.Status != candidate.ValidationPassed {
 			t.Fatalf("%s validation status = %q, want %q", definition.ID, artifact.Validation.Status, candidate.ValidationPassed)
 		}
+		if artifact.PromptPath != filepath.Join(outDir, "prompts", string(definition.ID)+".md") {
+			t.Fatalf("%s PromptPath = %q", definition.ID, artifact.PromptPath)
+		}
+		promptPayload, err := os.ReadFile(artifact.PromptPath)
+		if err != nil {
+			t.Fatalf("read prompt artifact %s: %v", definition.ID, err)
+		}
+		promptText := string(promptPayload)
+		if !strings.Contains(promptText, "Example panic") {
+			t.Fatalf("%s prompt missing issue title:\n%s", definition.ID, promptText)
+		}
+		if !strings.Contains(promptText, "pkg/buggy.go") {
+			t.Fatalf("%s prompt missing mapped snippet path:\n%s", definition.ID, promptText)
+		}
+		if artifact.Agent.Backend != "stub" {
+			t.Fatalf("%s agent backend = %q, want stub", definition.ID, artifact.Agent.Backend)
+		}
 		if !artifact.EmptyDiff {
 			t.Fatalf("%s EmptyDiff = false, want true for stub agent", definition.ID)
 		}
@@ -221,6 +241,12 @@ func TestRunExecutesCandidatePipeline(t *testing.T) {
 
 	if !strings.Contains(stdout.String(), "Candidate artifacts: 4") {
 		t.Fatalf("stdout missing candidate artifact count: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Agent: stub") {
+		t.Fatalf("stdout missing agent mode: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Prompt artifacts: 4") {
+		t.Fatalf("stdout missing prompt artifact count: %s", stdout.String())
 	}
 	if !strings.Contains(stdout.String(), "Validation: passed=4 failed=0 timed_out=0 not_run=0") {
 		t.Fatalf("stdout missing validation summary: %s", stdout.String())

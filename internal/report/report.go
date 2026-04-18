@@ -8,6 +8,7 @@ import (
 
 	"github.com/Slop-Happens/varsynth/internal/candidate"
 	"github.com/Slop-Happens/varsynth/internal/lens"
+	"github.com/Slop-Happens/varsynth/internal/sanitize"
 )
 
 type Summary struct {
@@ -26,7 +27,10 @@ type CandidateSummary struct {
 	LensName         string                     `json:"lens_name"`
 	ArtifactPath     string                     `json:"artifact_path,omitempty"`
 	Status           candidate.Status           `json:"status"`
+	FailureStage     candidate.FailureStage     `json:"failure_stage,omitempty"`
 	WorktreePath     string                     `json:"worktree_path,omitempty"`
+	PromptPath       string                     `json:"prompt_path,omitempty"`
+	AgentBackend     string                     `json:"agent_backend,omitempty"`
 	ChangedFileCount int                        `json:"changed_file_count"`
 	ChangedFiles     []string                   `json:"changed_files"`
 	EmptyDiff        bool                       `json:"empty_diff"`
@@ -46,7 +50,10 @@ func FromArtifact(artifactPath string, artifact candidate.Artifact, err string) 
 		LensName:         artifact.Lens.Name,
 		ArtifactPath:     artifactPath,
 		Status:           artifact.Status,
+		FailureStage:     artifact.FailureStage,
 		WorktreePath:     artifact.WorktreePath,
+		PromptPath:       artifact.PromptPath,
+		AgentBackend:     artifact.Agent.Backend,
 		ChangedFileCount: len(changedFiles),
 		ChangedFiles:     changedFiles,
 		EmptyDiff:        artifact.EmptyDiff,
@@ -68,6 +75,7 @@ func Write(outDir string, summary Summary) (string, error) {
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return "", fmt.Errorf("create report directory: %w", err)
 	}
+	summary = sanitizedSummary(summary)
 
 	path := Path(outDir)
 	payload, err := json.MarshalIndent(summary, "", "  ")
@@ -80,6 +88,15 @@ func Write(outDir string, summary Summary) (string, error) {
 		return "", fmt.Errorf("write report: %w", err)
 	}
 	return path, nil
+}
+
+func sanitizedSummary(summary Summary) Summary {
+	summary.TestCommand = sanitize.Secrets(summary.TestCommand)
+	summary.CleanupError = sanitize.Secrets(summary.CleanupError)
+	for idx := range summary.Candidates {
+		summary.Candidates[idx].Error = sanitize.Secrets(summary.Candidates[idx].Error)
+	}
+	return summary
 }
 
 func firstNonEmpty(values ...string) string {

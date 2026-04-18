@@ -15,6 +15,7 @@ import (
 	"github.com/Slop-Happens/varsynth/internal/agent"
 	"github.com/Slop-Happens/varsynth/internal/candidate"
 	"github.com/Slop-Happens/varsynth/internal/lens"
+	"github.com/Slop-Happens/varsynth/internal/prompt"
 	reportpkg "github.com/Slop-Happens/varsynth/internal/report"
 )
 
@@ -76,6 +77,15 @@ func TestExecuteCreatesCandidateArtifacts(t *testing.T) {
 		}
 		if artifact.WorktreePath == "" {
 			t.Fatalf("%s WorktreePath is empty", definition.ID)
+		}
+		if artifact.PromptPath != promptPath(outDir, definition.ID) {
+			t.Fatalf("%s PromptPath = %q, want %q", definition.ID, artifact.PromptPath, promptPath(outDir, definition.ID))
+		}
+		if _, err := os.Stat(artifact.PromptPath); err != nil {
+			t.Fatalf("%s prompt artifact missing: %v", definition.ID, err)
+		}
+		if artifact.Agent.Backend != "stub" {
+			t.Fatalf("%s Agent.Backend = %q, want stub", definition.ID, artifact.Agent.Backend)
 		}
 		if _, err := os.Stat(artifact.WorktreePath); !os.IsNotExist(err) {
 			t.Fatalf("%s worktree path still exists after cleanup: %v", definition.ID, err)
@@ -249,6 +259,9 @@ func TestExecuteIsolatesCandidateAgentFailure(t *testing.T) {
 	if minimalist.Status != candidate.StatusFailed {
 		t.Fatalf("minimalist Status = %q, want %q", minimalist.Status, candidate.StatusFailed)
 	}
+	if minimalist.FailureStage != candidate.FailureAgent {
+		t.Fatalf("minimalist FailureStage = %q, want %q", minimalist.FailureStage, candidate.FailureAgent)
+	}
 	if minimalist.Error != "minimalist failed" {
 		t.Fatalf("minimalist Error = %q, want minimalist failed", minimalist.Error)
 	}
@@ -315,6 +328,125 @@ func TestExecuteIsolatesCandidateAgentFailure(t *testing.T) {
 	}
 }
 
+func TestExecuteBackendRunnerChangeAppearsInCandidateDiff(t *testing.T) {
+	ctx := context.Background()
+	repoRoot, baseCommit := initRepo(t, ctx)
+	outDir := t.TempDir()
+
+	result, err := Execute(ctx, Options{
+		RunID:        "run-backend",
+		RepoRoot:     repoRoot,
+		BaseCommit:   baseCommit,
+		TestCommand:  "test -f backend.txt",
+		OutDir:       outDir,
+		WorktreeRoot: filepath.Join(t.TempDir(), "worktrees"),
+		PromptContext: prompt.Context{
+			Issue: prompt.Issue{
+				ID:    "ISSUE-1",
+				Title: "backend creates a file",
+			},
+			Snippets: []prompt.Snippet{
+				{
+					ID:          "snippet-0",
+					File:        "app.txt",
+					StartLine:   1,
+					EndLine:     1,
+					FocusLine:   1,
+					SourceLines: []string{"hello"},
+				},
+			},
+		},
+		Agent: agent.BackendRunner{
+			Backend: fakeBackend{
+				run: func(request agent.Request) (agent.Response, error) {
+					if !strings.Contains(request.Prompt, "backend creates a file") {
+						return agent.Response{}, fmt.Errorf("prompt missing issue title")
+					}
+					if request.Lens.ID == lens.Performance {
+						return agent.Response{}, fmt.Errorf("performance backend failed")
+					}
+					path := filepath.Join(request.WorktreePath, "backend.txt")
+					if err := os.WriteFile(path, []byte("created by backend\n"), 0o644); err != nil {
+						return agent.Response{}, err
+					}
+					return agent.Response{
+						Rationale: "created backend.txt",
+						RootCause: "missing backend fixture",
+						Stdout:    "ok",
+					}, nil
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute() returned error: %v", err)
+	}
+
+	defensive := readArtifact(t, candidate.Path(outDir, lens.Defensive))
+	if defensive.Status != candidate.StatusValidationPassed {
+		t.Fatalf("defensive Status = %q, want %q", defensive.Status, candidate.StatusValidationPassed)
+	}
+	if defensive.Rationale != "created backend.txt" {
+		t.Fatalf("defensive Rationale = %q", defensive.Rationale)
+	}
+	if defensive.RootCause != "missing backend fixture" {
+		t.Fatalf("defensive RootCause = %q", defensive.RootCause)
+	}
+	if defensive.Agent.Backend != "fake" {
+		t.Fatalf("defensive Agent.Backend = %q, want fake", defensive.Agent.Backend)
+	}
+	if defensive.EmptyDiff {
+		t.Fatal("defensive EmptyDiff = true, want false")
+	}
+	if len(defensive.ChangedFiles) != 1 || defensive.ChangedFiles[0] != "backend.txt" {
+		t.Fatalf("defensive ChangedFiles = %#v, want backend.txt", defensive.ChangedFiles)
+	}
+	if !strings.Contains(defensive.Diff, "created by backend") {
+		t.Fatalf("defensive Diff missing backend change:\n%s", defensive.Diff)
+	}
+	if defensive.PromptPath != promptPath(outDir, lens.Defensive) {
+		t.Fatalf("defensive PromptPath = %q, want %q", defensive.PromptPath, promptPath(outDir, lens.Defensive))
+	}
+
+	performance := readArtifact(t, candidate.Path(outDir, lens.Performance))
+	if performance.Status != candidate.StatusFailed {
+		t.Fatalf("performance Status = %q, want %q", performance.Status, candidate.StatusFailed)
+	}
+	if performance.FailureStage != candidate.FailureAgent {
+		t.Fatalf("performance FailureStage = %q, want %q", performance.FailureStage, candidate.FailureAgent)
+	}
+	if performance.Validation.Status != candidate.ValidationNotRun {
+		t.Fatalf("performance Validation.Status = %q, want %q", performance.Validation.Status, candidate.ValidationNotRun)
+	}
+	if performance.PromptPath != promptPath(outDir, lens.Performance) {
+		t.Fatalf("performance PromptPath = %q, want %q", performance.PromptPath, promptPath(outDir, lens.Performance))
+	}
+
+	report := readReport(t, result.ReportPath)
+	var failed int
+	var passed int
+	for _, summary := range report.Candidates {
+		if summary.Status == candidate.StatusFailed {
+			failed++
+			if summary.FailureStage != candidate.FailureAgent {
+				t.Fatalf("failed summary FailureStage = %q, want %q", summary.FailureStage, candidate.FailureAgent)
+			}
+		}
+		if summary.Status == candidate.StatusValidationPassed {
+			passed++
+			if summary.AgentBackend != "fake" {
+				t.Fatalf("passed summary AgentBackend = %q, want fake", summary.AgentBackend)
+			}
+		}
+	}
+	if failed != 1 {
+		t.Fatalf("failed summaries = %d, want 1", failed)
+	}
+	if passed != len(lens.All())-1 {
+		t.Fatalf("passed summaries = %d, want %d", passed, len(lens.All())-1)
+	}
+}
+
 func TestExecuteRequiresRunIDAndOutDir(t *testing.T) {
 	if _, err := Execute(context.Background(), Options{OutDir: t.TempDir()}); err == nil {
 		t.Fatal("Execute() with empty run id returned nil error")
@@ -333,6 +465,21 @@ func (script scriptedAgent) Run(ctx context.Context, input agent.Input) (agent.R
 		return agent.Result{}, err
 	}
 	return script.run(input)
+}
+
+type fakeBackend struct {
+	run func(request agent.Request) (agent.Response, error)
+}
+
+func (backend fakeBackend) Name() string {
+	return "fake"
+}
+
+func (backend fakeBackend) Run(ctx context.Context, request agent.Request) (agent.Response, error) {
+	if err := ctx.Err(); err != nil {
+		return agent.Response{}, err
+	}
+	return backend.run(request)
 }
 
 type concurrencyAgent struct {
@@ -501,4 +648,8 @@ func readReport(t *testing.T, path string) reportpkg.Summary {
 		t.Fatalf("Unmarshal(%s) returned error: %v", path, err)
 	}
 	return summary
+}
+
+func promptPath(outDir string, id lens.ID) string {
+	return filepath.Join(outDir, "prompts", string(id)+".md")
 }

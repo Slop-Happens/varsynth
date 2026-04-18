@@ -10,7 +10,9 @@ import (
 	ctxbundle "github.com/Slop-Happens/varsynth/cmd/varsynth/internal/context"
 	"github.com/Slop-Happens/varsynth/cmd/varsynth/internal/issue"
 	"github.com/Slop-Happens/varsynth/cmd/varsynth/internal/repo"
+	"github.com/Slop-Happens/varsynth/internal/agent"
 	"github.com/Slop-Happens/varsynth/internal/candidate"
+	"github.com/Slop-Happens/varsynth/internal/prompt"
 	runpkg "github.com/Slop-Happens/varsynth/internal/run"
 )
 
@@ -60,6 +62,8 @@ func Run(args []string, stdout, stderr io.Writer) error {
 
 	runResult, runErr := runpkg.Execute(context.Background(), runOptionsFromBundle(cfg, bundle))
 
+	fmt.Fprintf(stdout, "Agent: %s\n", cfg.AgentMode)
+	fmt.Fprintf(stdout, "Prompt artifacts: %d\n", countPromptArtifacts(runResult.Candidates))
 	fmt.Fprintf(stdout, "Candidate artifacts: %d\n", countWrittenArtifacts(runResult.Candidates))
 	fmt.Fprintf(stdout, "Validation: passed=%d failed=%d timed_out=%d not_run=%d\n",
 		countValidationStatus(runResult.Candidates, candidate.ValidationPassed),
@@ -89,6 +93,67 @@ func runOptionsFromBundle(cfg config.Config, bundle ctxbundle.Bundle) runpkg.Opt
 		OutDir:            cfg.OutDir,
 		WorktreeRoot:      filepath.Join(cfg.OutDir, "worktrees"),
 		PreserveWorktrees: cfg.PreserveWorktrees,
+		PromptContext:     promptContextFromBundle(bundle),
+		Agent:             agentRunnerFromConfig(cfg),
+	}
+}
+
+func promptContextFromBundle(bundle ctxbundle.Bundle) prompt.Context {
+	ctx := prompt.Context{
+		RunID:        bundle.RunID,
+		RepoRoot:     bundle.RepoRoot,
+		BaseBranch:   bundle.BaseBranch,
+		BaseCommit:   bundle.BaseCommit,
+		TestCommand:  bundle.TestCommand,
+		Dirty:        bundle.DirtyState.Dirty,
+		DirtySummary: append([]string(nil), bundle.DirtyState.Summary...),
+		Issue: prompt.Issue{
+			ID:          bundle.Issue.ID,
+			Title:       bundle.Issue.Title,
+			Message:     bundle.Issue.Message,
+			Service:     bundle.Issue.Service,
+			Environment: bundle.Issue.Environment,
+		},
+		StackFrames: make([]prompt.StackFrame, 0, len(bundle.StackFrames)),
+		Snippets:    make([]prompt.Snippet, 0, len(bundle.Snippets)),
+	}
+	for _, frame := range bundle.StackFrames {
+		ctx.StackFrames = append(ctx.StackFrames, prompt.StackFrame{
+			Index:         frame.Index,
+			File:          frame.File,
+			Line:          frame.Line,
+			Function:      frame.Function,
+			Module:        frame.Module,
+			InApp:         frame.InApp,
+			ResolvedPath:  frame.ResolvedPath,
+			Status:        frame.Status,
+			SnippetID:     frame.SnippetID,
+			StatusMessage: frame.StatusMessage,
+		})
+	}
+	for _, snippet := range bundle.Snippets {
+		ctx.Snippets = append(ctx.Snippets, prompt.Snippet{
+			ID:          snippet.ID,
+			File:        snippet.File,
+			StartLine:   snippet.StartLine,
+			EndLine:     snippet.EndLine,
+			FocusLine:   snippet.FocusLine,
+			SourceLines: append([]string(nil), snippet.SourceLines...),
+		})
+	}
+	return ctx
+}
+
+func agentRunnerFromConfig(cfg config.Config) agent.Runner {
+	if cfg.AgentMode != config.AgentCodex {
+		return agent.Stub{}
+	}
+	return agent.BackendRunner{
+		Backend: agent.CodexBackend{
+			Command: cfg.CodexCommand,
+			Model:   cfg.CodexModel,
+			Timeout: cfg.AgentTimeout,
+		},
 	}
 }
 
@@ -96,6 +161,16 @@ func countWrittenArtifacts(results []runpkg.CandidateResult) int {
 	count := 0
 	for _, result := range results {
 		if result.ArtifactPath != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func countPromptArtifacts(results []runpkg.CandidateResult) int {
+	count := 0
+	for _, result := range results {
+		if result.Artifact.PromptPath != "" {
 			count++
 		}
 	}

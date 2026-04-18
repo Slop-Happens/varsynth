@@ -11,6 +11,7 @@ import (
 	"github.com/Slop-Happens/varsynth/internal/agent"
 	"github.com/Slop-Happens/varsynth/internal/candidate"
 	"github.com/Slop-Happens/varsynth/internal/lens"
+	"github.com/Slop-Happens/varsynth/internal/prompt"
 	"github.com/Slop-Happens/varsynth/internal/report"
 	"github.com/Slop-Happens/varsynth/internal/validation"
 	"github.com/Slop-Happens/varsynth/internal/worktree"
@@ -26,6 +27,7 @@ type Options struct {
 	PreserveWorktrees     bool
 	ValidationTimeout     time.Duration
 	MaxValidationLogBytes int
+	PromptContext         prompt.Context
 	Agent                 agent.Runner
 }
 
@@ -92,7 +94,7 @@ func Execute(ctx context.Context, opts Options) (Result, error) {
 
 		tree, err := manager.Create(ctx, definition)
 		if err != nil {
-			artifact.MarkFailed(err)
+			artifact.MarkFailedAt(candidate.FailureSetup, err)
 			result.Candidates[i] = writeCandidate(opts.OutDir, artifact, candidateResult)
 			continue
 		}
@@ -163,22 +165,40 @@ func executePreparedCandidate(ctx context.Context, opts Options, runner agent.Ru
 		Artifact: artifact,
 	}
 
+	promptPayload, err := prompt.Build(promptContext(opts), definition)
+	if err != nil {
+		artifact.MarkFailedAt(candidate.FailurePrompt, err)
+		return writeCandidate(opts.OutDir, artifact, candidateResult)
+	}
+	promptPath, err := prompt.Write(opts.OutDir, promptPayload)
+	if err != nil {
+		artifact.MarkFailedAt(candidate.FailurePrompt, err)
+		return writeCandidate(opts.OutDir, artifact, candidateResult)
+	}
+	artifact.PromptPath = promptPath
+
 	agentResult, err := runner.Run(ctx, agent.Input{
 		RunID:        opts.RunID,
 		Lens:         definition,
 		WorktreePath: tree.Path,
+		TestCommand:  opts.TestCommand,
+		Prompt:       promptPayload.Text,
+		PromptPath:   promptPath,
+	})
+	artifact.SetAgentResult(agentResult.Rationale, agentResult.RootCause, candidate.AgentResult{
+		Backend: agentResult.Backend,
+		Stdout:  agentResult.Stdout,
+		Stderr:  agentResult.Stderr,
 	})
 	if err != nil {
-		artifact.MarkFailed(err)
+		artifact.MarkFailedAt(candidate.FailureAgent, err)
 		return writeCandidate(opts.OutDir, artifact, candidateResult)
 	}
-	artifact.Rationale = agentResult.Rationale
-	artifact.RootCause = agentResult.RootCause
 	artifact.MarkAgentNoop()
 
 	diff, err := worktree.CollectDiff(ctx, tree)
 	if err != nil {
-		artifact.MarkFailed(err)
+		artifact.MarkFailedAt(candidate.FailureDiff, err)
 		return writeCandidate(opts.OutDir, artifact, candidateResult)
 	}
 	artifact.SetDiff(diff.ChangedFiles, diff.Text)
@@ -192,6 +212,23 @@ func executePreparedCandidate(ctx context.Context, opts Options, runner agent.Ru
 	artifact.SetValidation(validationResult)
 
 	return writeCandidate(opts.OutDir, artifact, candidateResult)
+}
+
+func promptContext(opts Options) prompt.Context {
+	ctx := opts.PromptContext
+	if ctx.RunID == "" {
+		ctx.RunID = opts.RunID
+	}
+	if ctx.RepoRoot == "" {
+		ctx.RepoRoot = opts.RepoRoot
+	}
+	if ctx.BaseCommit == "" {
+		ctx.BaseCommit = opts.BaseCommit
+	}
+	if ctx.TestCommand == "" {
+		ctx.TestCommand = opts.TestCommand
+	}
+	return ctx
 }
 
 func collectWriteErrors(results []CandidateResult) []error {

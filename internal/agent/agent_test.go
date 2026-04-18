@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -84,4 +85,116 @@ func TestStubRunHonorsCanceledContext(t *testing.T) {
 
 func TestStubImplementsRunner(t *testing.T) {
 	var _ Runner = Stub{}
+}
+
+func TestBackendRunnerPassesPromptAndCapturesOutput(t *testing.T) {
+	definition, ok := lens.Lookup(lens.Performance)
+	if !ok {
+		t.Fatal("lens.Lookup(Performance) returned false")
+	}
+	backend := &recordingBackend{
+		response: Response{
+			Rationale: "changed cache handling",
+			RootCause: "stale cache entry",
+			Stdout:    "token=secret-token-value",
+			Stderr:    "warning",
+		},
+	}
+
+	result, err := BackendRunner{Backend: backend}.Run(context.Background(), Input{
+		RunID:        "run-1",
+		Lens:         definition,
+		WorktreePath: t.TempDir(),
+		TestCommand:  "go test ./...",
+		Prompt:       "repair prompt",
+		PromptPath:   "/tmp/prompts/performance.md",
+	})
+	if err != nil {
+		t.Fatalf("Run() returned error: %v", err)
+	}
+
+	if backend.request.Prompt != "repair prompt" {
+		t.Fatalf("backend prompt = %q, want repair prompt", backend.request.Prompt)
+	}
+	if result.Backend != "recording" {
+		t.Fatalf("Backend = %q, want recording", result.Backend)
+	}
+	if result.Rationale != "changed cache handling" {
+		t.Fatalf("Rationale = %q", result.Rationale)
+	}
+	if result.RootCause != "stale cache entry" {
+		t.Fatalf("RootCause = %q", result.RootCause)
+	}
+	if strings.Contains(result.Stdout, "secret-token-value") {
+		t.Fatalf("Stdout leaked secret: %q", result.Stdout)
+	}
+}
+
+func TestBackendRunnerReturnsPartialResultOnFailure(t *testing.T) {
+	definition, ok := lens.Lookup(lens.Defensive)
+	if !ok {
+		t.Fatal("lens.Lookup(Defensive) returned false")
+	}
+	backend := &recordingBackend{
+		response: Response{
+			Rationale: "partial rationale",
+			RootCause: "partial root cause",
+			Stderr:    "backend failed",
+		},
+		err: fmt.Errorf("backend boom"),
+	}
+
+	result, err := BackendRunner{Backend: backend}.Run(context.Background(), Input{
+		RunID:        "run-1",
+		Lens:         definition,
+		WorktreePath: t.TempDir(),
+		Prompt:       "repair prompt",
+	})
+	if err == nil {
+		t.Fatal("Run() returned nil error")
+	}
+	if result.Rationale != "partial rationale" {
+		t.Fatalf("partial Rationale = %q", result.Rationale)
+	}
+	if result.Stderr != "backend failed" {
+		t.Fatalf("partial Stderr = %q", result.Stderr)
+	}
+}
+
+func TestParseFinalResponse(t *testing.T) {
+	rationale, rootCause := ParseFinalResponse(strings.Join([]string{
+		"Rationale:",
+		"Updated nil handling.",
+		"Root Cause:",
+		"Missing guard before dereference.",
+	}, "\n"))
+	if rationale != "Updated nil handling." {
+		t.Fatalf("rationale = %q", rationale)
+	}
+	if rootCause != "Missing guard before dereference." {
+		t.Fatalf("rootCause = %q", rootCause)
+	}
+
+	rationale, rootCause = ParseFinalResponse(`{"rationale":"small patch","root_cause":"bad branch"}`)
+	if rationale != "small patch" || rootCause != "bad branch" {
+		t.Fatalf("json parse = %q / %q", rationale, rootCause)
+	}
+}
+
+type recordingBackend struct {
+	request  Request
+	response Response
+	err      error
+}
+
+func (backend *recordingBackend) Name() string {
+	return "recording"
+}
+
+func (backend *recordingBackend) Run(ctx context.Context, request Request) (Response, error) {
+	if err := ctx.Err(); err != nil {
+		return Response{}, err
+	}
+	backend.request = request
+	return backend.response, backend.err
 }

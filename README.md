@@ -9,6 +9,8 @@ The current implementation supports:
 - repository/bootstrap context generation
 - candidate worktree creation for four repair lenses
 - stub-backed candidate execution
+- opt-in Codex-backed candidate execution
+- prompt artifact generation for each repair lens
 - validation command execution per candidate
 - JSON artifact generation
 
@@ -68,6 +70,28 @@ go run ./cmd/varsynth \
   --preserve-worktrees
 ```
 
+## Codex Agent
+
+Varsynth defaults to the offline stub agent so demos and tests do not require
+live model access.
+
+To use the Codex CLI backend for each candidate worktree:
+
+```sh
+go run ./cmd/varsynth \
+  --repo /Users/dominikhobel/Desktop/Test \
+  --issue-file /Users/dominikhobel/Desktop/Test/issue.json \
+  --test-command "go test ./..." \
+  --out ./out/demo \
+  --agent codex
+```
+
+Optional Codex settings:
+
+- `--codex-command` overrides the Codex CLI executable path.
+- `--codex-model` passes a model override to `codex exec`.
+- `--agent-timeout` sets a per-candidate agent timeout, for example `10m`.
+
 ## Expected Output
 
 Dry-run output writes only:
@@ -77,6 +101,10 @@ Dry-run output writes only:
 Normal output writes:
 
 - `out/demo/context.json`
+- `out/demo/prompts/defensive.md`
+- `out/demo/prompts/minimalist.md`
+- `out/demo/prompts/architect.md`
+- `out/demo/prompts/performance.md`
 - `out/demo/candidates/defensive.json`
 - `out/demo/candidates/minimalist.json`
 - `out/demo/candidates/architect.json`
@@ -87,14 +115,8 @@ If `--preserve-worktrees` is used, candidate worktrees are also kept under:
 
 - `out/demo/worktrees/`
 
-## Current Limitation
+## Stub Mode
 
-The candidate runner is still stub-backed.
-
-That means:
-
-- the pipeline executes end to end
-- candidate artifacts and `report.json` are written
-- validation runs in each candidate worktree
-- candidate diffs are usually empty because no real code-generation backend is
-  wired in yet
+The default stub mode executes the full pipeline without modifying candidate
+worktrees. Candidate diffs are usually empty in this mode. Use `--agent codex`
+to run prompt-driven generation inside each isolated worktree.
