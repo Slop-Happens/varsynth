@@ -19,6 +19,7 @@
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
             go
+            gnumake
             gopls
             gotools
             gofumpt
@@ -35,9 +36,10 @@
           shellHook = ''
             export GOPATH="$PWD/.go"
             export GOBIN="$GOPATH/bin"
+            export GOCACHE="$PWD/.go/build-cache"
             export PATH="$GOBIN:$PATH"
 
-            mkdir -p "$GOPATH" "$GOBIN"
+            mkdir -p "$GOPATH" "$GOBIN" "$GOCACHE"
 
             echo "Go dev shell ready: $(go version)"
           '';

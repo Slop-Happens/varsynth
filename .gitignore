@@ -2,6 +2,9 @@
 bin/
 dist/
 coverage.out
+workpackage.md
+todo.md
+.codex
 out/
 .DS_Store
 issue.json
