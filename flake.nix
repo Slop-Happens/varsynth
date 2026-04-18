@@ -19,6 +19,7 @@
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
             go
+            gnumake
             gopls
             gotools
             gofumpt
