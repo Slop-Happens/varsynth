@@ -115,6 +115,35 @@ func TestCollectDiffRemovesUntrackedCodexArtifact(t *testing.T) {
 	}
 }
 
+func TestApplyPatchAppliesDiffToWorktree(t *testing.T) {
+	ctx := context.Background()
+	tree, cleanup := createTestWorktree(t, ctx, lens.Defensive)
+	defer cleanup()
+
+	patch := strings.Join([]string{
+		"diff --git a/app.txt b/app.txt",
+		"index ce01362..94954ab 100644",
+		"--- a/app.txt",
+		"+++ b/app.txt",
+		"@@ -1 +1,2 @@",
+		" hello",
+		"+world",
+		"",
+	}, "\n")
+
+	if err := ApplyPatch(ctx, tree, patch); err != nil {
+		t.Fatalf("ApplyPatch() returned error: %v", err)
+	}
+
+	payload, err := os.ReadFile(filepath.Join(tree.Path, "app.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile(app.txt) returned error: %v", err)
+	}
+	if string(payload) != "hello\nworld\n" {
+		t.Fatalf("app.txt = %q, want patched content", string(payload))
+	}
+}
+
 func TestCollectDiffRequiresWorktreePath(t *testing.T) {
 	_, err := CollectDiff(context.Background(), Tree{})
 	if err == nil {

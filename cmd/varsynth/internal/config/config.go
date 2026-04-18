@@ -80,6 +80,8 @@ func Parse(args []string, stderr io.Writer) (Config, error) {
 	}
 	cfg.CodexCommand = strings.TrimSpace(cfg.CodexCommand)
 	cfg.CodexModel = strings.TrimSpace(cfg.CodexModel)
+	cfg.SelectCandidate = strings.ToLower(strings.TrimSpace(cfg.SelectCandidate))
+	cfg.CriticMode = strings.ToLower(strings.TrimSpace(cfg.CriticMode))
 
 	return cfg, nil
 }
@@ -114,10 +116,12 @@ func (c Config) Validate() error {
 	if c.AgentRetryDelay < 0 {
 		errs = append(errs, errors.New("--agent-retry-delay must be greater than or equal to 0"))
 	}
-	if c.SelectCandidate != "deterministic" && c.SelectCandidate != "off" {
+	switch strings.ToLower(strings.TrimSpace(c.SelectCandidate)) {
+	case "deterministic", "off":
+	default:
 		errs = append(errs, fmt.Errorf("--select-candidate must be deterministic or off"))
 	}
-	switch c.CriticMode {
+	switch strings.ToLower(strings.TrimSpace(c.CriticMode)) {
 	case "off", "stub", "codex":
 	default:
 		errs = append(errs, fmt.Errorf("--critic must be off, stub, or codex"))

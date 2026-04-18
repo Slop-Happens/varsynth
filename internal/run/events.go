@@ -20,6 +20,11 @@ const (
 	eventValidationStarted  = "validation_started"
 	eventValidationFinished = "validation_finished"
 	eventCandidateWritten   = "candidate_written"
+	eventCriticStarted      = "critic_started"
+	eventCriticFinished     = "critic_finished"
+	eventFinalAgentStarted  = "final_agent_started"
+	eventFinalAgentFinished = "final_agent_finished"
+	eventFinalPatchWritten  = "final_patch_written"
 )
 
 type Event struct {

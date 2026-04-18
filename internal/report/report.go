@@ -12,24 +12,51 @@ import (
 )
 
 type Summary struct {
-	RunID             string             `json:"run_id"`
-	RepoRoot          string             `json:"repo_root"`
-	BaseCommit        string             `json:"base_commit"`
-	TestCommand       string             `json:"test_command"`
-	OutDir            string             `json:"out_dir"`
-	WorktreeRoot      string             `json:"worktree_root"`
-	RunEventsPath     string             `json:"run_events_path,omitempty"`
-	Candidates        []CandidateSummary `json:"candidates"`
-	EvaluationPath    string             `json:"evaluation_path,omitempty"`
-	FinalPatchPath    string             `json:"final_patch_path,omitempty"`
-	SelectedCandidate *SelectedCandidate `json:"selected_candidate,omitempty"`
-	CleanupError      string             `json:"cleanup_error,omitempty"`
+	RunID               string                      `json:"run_id"`
+	RepoRoot            string                      `json:"repo_root"`
+	BaseCommit          string                      `json:"base_commit"`
+	TestCommand         string                      `json:"test_command"`
+	OutDir              string                      `json:"out_dir"`
+	WorktreeRoot        string                      `json:"worktree_root"`
+	RunEventsPath       string                      `json:"run_events_path,omitempty"`
+	Candidates          []CandidateSummary          `json:"candidates"`
+	EvaluationPath      string                      `json:"evaluation_path,omitempty"`
+	FinalPatchPath      string                      `json:"final_patch_path,omitempty"`
+	SelectedCandidate   *SelectedCandidate          `json:"selected_candidate,omitempty"`
+	Critic              *CriticSummary              `json:"critic,omitempty"`
+	FinalImplementation *FinalImplementationSummary `json:"final_implementation,omitempty"`
+	CleanupError        string                      `json:"cleanup_error,omitempty"`
 }
 
 type SelectedCandidate struct {
 	LensID       lens.ID `json:"lens_id"`
 	ArtifactPath string  `json:"artifact_path,omitempty"`
 	Rationale    string  `json:"rationale"`
+}
+
+type CriticSummary struct {
+	SelectedLensID             lens.ID `json:"selected_lens_id,omitempty"`
+	Rationale                  string  `json:"rationale,omitempty"`
+	DisagreementSummary        string  `json:"disagreement_summary,omitempty"`
+	RiskNotes                  string  `json:"risk_notes,omitempty"`
+	ImplementationInstructions string  `json:"implementation_instructions,omitempty"`
+	ArtifactPath               string  `json:"artifact_path,omitempty"`
+	PromptPath                 string  `json:"prompt_path,omitempty"`
+	StdoutPath                 string  `json:"stdout_path,omitempty"`
+	StderrPath                 string  `json:"stderr_path,omitempty"`
+}
+
+type FinalImplementationSummary struct {
+	Attempted        bool                       `json:"attempted"`
+	UsedFallback     bool                       `json:"used_fallback"`
+	ArtifactPath     string                     `json:"artifact_path,omitempty"`
+	WorktreePath     string                     `json:"worktree_path,omitempty"`
+	PromptPath       string                     `json:"prompt_path,omitempty"`
+	AgentLogDir      string                     `json:"agent_log_dir,omitempty"`
+	Status           candidate.Status           `json:"status,omitempty"`
+	ValidationStatus candidate.ValidationStatus `json:"validation_status,omitempty"`
+	Rationale        string                     `json:"rationale,omitempty"`
+	Error            string                     `json:"error,omitempty"`
 }
 
 type CandidateSummary struct {
@@ -125,6 +152,24 @@ func sanitizedSummary(summary Summary) Summary {
 	if summary.SelectedCandidate != nil {
 		summary.SelectedCandidate.ArtifactPath = sanitize.Secrets(summary.SelectedCandidate.ArtifactPath)
 		summary.SelectedCandidate.Rationale = sanitize.Secrets(summary.SelectedCandidate.Rationale)
+	}
+	if summary.Critic != nil {
+		summary.Critic.Rationale = sanitize.Secrets(summary.Critic.Rationale)
+		summary.Critic.DisagreementSummary = sanitize.Secrets(summary.Critic.DisagreementSummary)
+		summary.Critic.RiskNotes = sanitize.Secrets(summary.Critic.RiskNotes)
+		summary.Critic.ImplementationInstructions = sanitize.Secrets(summary.Critic.ImplementationInstructions)
+		summary.Critic.ArtifactPath = sanitize.Secrets(summary.Critic.ArtifactPath)
+		summary.Critic.PromptPath = sanitize.Secrets(summary.Critic.PromptPath)
+		summary.Critic.StdoutPath = sanitize.Secrets(summary.Critic.StdoutPath)
+		summary.Critic.StderrPath = sanitize.Secrets(summary.Critic.StderrPath)
+	}
+	if summary.FinalImplementation != nil {
+		summary.FinalImplementation.ArtifactPath = sanitize.Secrets(summary.FinalImplementation.ArtifactPath)
+		summary.FinalImplementation.WorktreePath = sanitize.Secrets(summary.FinalImplementation.WorktreePath)
+		summary.FinalImplementation.PromptPath = sanitize.Secrets(summary.FinalImplementation.PromptPath)
+		summary.FinalImplementation.AgentLogDir = sanitize.Secrets(summary.FinalImplementation.AgentLogDir)
+		summary.FinalImplementation.Rationale = sanitize.Secrets(summary.FinalImplementation.Rationale)
+		summary.FinalImplementation.Error = sanitize.Secrets(summary.FinalImplementation.Error)
 	}
 	for idx := range summary.Candidates {
 		summary.Candidates[idx].Error = sanitize.Secrets(summary.Candidates[idx].Error)

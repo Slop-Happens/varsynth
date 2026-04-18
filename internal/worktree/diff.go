@@ -1,9 +1,11 @@
 package worktree
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -45,6 +47,23 @@ func CollectDiff(ctx context.Context, tree Tree) (Diff, error) {
 		Text:         diffText,
 		Empty:        diffText == "",
 	}, nil
+}
+
+func ApplyPatch(ctx context.Context, tree Tree, patch string) error {
+	if strings.TrimSpace(tree.Path) == "" {
+		return fmt.Errorf("worktree path is required")
+	}
+	if strings.TrimSpace(patch) == "" {
+		return fmt.Errorf("patch is required")
+	}
+
+	cmd := exec.CommandContext(ctx, "git", "-C", tree.Path, "apply", "--whitespace=nowarn", "-")
+	cmd.Stdin = strings.NewReader(patch)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("apply patch: %w: %s", err, string(bytes.TrimSpace(output)))
+	}
+	return nil
 }
 
 func removeUntrackedCodexArtifact(ctx context.Context, path string) error {

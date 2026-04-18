@@ -14,6 +14,7 @@ import (
 
 	"github.com/Slop-Happens/varsynth/internal/agent"
 	"github.com/Slop-Happens/varsynth/internal/candidate"
+	"github.com/Slop-Happens/varsynth/internal/evaluation"
 	"github.com/Slop-Happens/varsynth/internal/lens"
 	"github.com/Slop-Happens/varsynth/internal/prompt"
 	reportpkg "github.com/Slop-Happens/varsynth/internal/report"
@@ -736,6 +737,89 @@ func TestExecuteBackendRunnerChangeAppearsInCandidateDiff(t *testing.T) {
 	}
 	if passed != len(lens.All())-1 {
 		t.Fatalf("passed summaries = %d, want %d", passed, len(lens.All())-1)
+	}
+}
+
+func TestExecuteRunsFinalImplementationAgentWithCritic(t *testing.T) {
+	ctx := context.Background()
+	repoRoot, baseCommit := initRepo(t, ctx)
+	outDir := t.TempDir()
+
+	result, err := Execute(ctx, Options{
+		RunID:        "run-final",
+		RepoRoot:     repoRoot,
+		BaseCommit:   baseCommit,
+		TestCommand:  "test -f candidate.txt",
+		OutDir:       outDir,
+		WorktreeRoot: filepath.Join(t.TempDir(), "worktrees"),
+		CriticMode:   evaluation.CriticStub,
+		Critic:       evaluation.StubCritic{},
+		Agent: scriptedAgent{
+			run: func(input agent.Input) (agent.Result, error) {
+				switch input.Lens.ID {
+				case lens.Performance:
+					path := filepath.Join(input.WorktreePath, "candidate.txt")
+					if err := os.WriteFile(path, []byte("selected\n"), 0o644); err != nil {
+						return agent.Result{}, err
+					}
+				case lens.ID("final"):
+					path := filepath.Join(input.WorktreePath, "candidate.txt")
+					if err := os.WriteFile(path, []byte("selected\nfinalized\n"), 0o644); err != nil {
+						return agent.Result{}, err
+					}
+				}
+				return agent.Result{
+					Rationale:       "agent rationale",
+					RootCause:       "agent root cause",
+					ChangedSummary:  "agent changed summary",
+					ValidationNotes: "agent validation notes",
+					Backend:         "scripted",
+				}, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute() returned error: %v", err)
+	}
+
+	if result.FinalImplementation == nil {
+		t.Fatal("FinalImplementation = nil, want final agent result")
+	}
+	if result.FinalImplementation.UsedFallback {
+		t.Fatal("FinalImplementation.UsedFallback = true, want synthesized final patch")
+	}
+	if result.FinalImplementation.ValidationStatus != candidate.ValidationPassed {
+		t.Fatalf("final ValidationStatus = %q, want %q", result.FinalImplementation.ValidationStatus, candidate.ValidationPassed)
+	}
+	if result.FinalImplementation.ArtifactPath != candidate.Path(outDir, lens.ID("final")) {
+		t.Fatalf("final ArtifactPath = %q", result.FinalImplementation.ArtifactPath)
+	}
+
+	finalArtifact := readArtifact(t, candidate.Path(outDir, lens.ID("final")))
+	if finalArtifact.Status != candidate.StatusValidationPassed {
+		t.Fatalf("final Status = %q, want %q", finalArtifact.Status, candidate.StatusValidationPassed)
+	}
+	if !strings.Contains(finalArtifact.Diff, "finalized") {
+		t.Fatalf("final artifact diff missing final agent change:\n%s", finalArtifact.Diff)
+	}
+
+	patch, err := os.ReadFile(filepath.Join(outDir, "final.patch"))
+	if err != nil {
+		t.Fatalf("read final.patch: %v", err)
+	}
+	if !strings.Contains(string(patch), "finalized") {
+		t.Fatalf("final.patch missing final agent change:\n%s", string(patch))
+	}
+
+	report := readReport(t, result.ReportPath)
+	if report.Critic == nil {
+		t.Fatal("report Critic = nil, want critic summary")
+	}
+	if report.FinalImplementation == nil {
+		t.Fatal("report FinalImplementation = nil")
+	}
+	if report.FinalImplementation.UsedFallback {
+		t.Fatal("report FinalImplementation.UsedFallback = true")
 	}
 }
 

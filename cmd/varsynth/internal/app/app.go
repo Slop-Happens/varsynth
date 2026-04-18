@@ -12,6 +12,7 @@ import (
 	"github.com/Slop-Happens/varsynth/cmd/varsynth/internal/repo"
 	"github.com/Slop-Happens/varsynth/internal/agent"
 	"github.com/Slop-Happens/varsynth/internal/candidate"
+	"github.com/Slop-Happens/varsynth/internal/evaluation"
 	"github.com/Slop-Happens/varsynth/internal/prompt"
 	runpkg "github.com/Slop-Happens/varsynth/internal/run"
 )
@@ -108,6 +109,7 @@ func runOptionsFromBundle(cfg config.Config, bundle ctxbundle.Bundle) runpkg.Opt
 		SelectCandidate:   cfg.SelectCandidate,
 		CriticMode:        cfg.CriticMode,
 		FinalPatch:        cfg.FinalPatch,
+		Critic:            criticFromConfig(cfg),
 	}
 }
 
@@ -168,6 +170,23 @@ func agentRunnerFromConfig(cfg config.Config) agent.Runner {
 			FullAuto: cfg.CodexFullAuto,
 			Timeout:  cfg.AgentTimeout,
 		},
+	}
+}
+
+func criticFromConfig(cfg config.Config) evaluation.Critic {
+	switch cfg.CriticMode {
+	case evaluation.CriticStub:
+		return evaluation.StubCritic{}
+	case evaluation.CriticCodex:
+		return evaluation.CodexCritic{
+			Command:  cfg.CodexCommand,
+			Model:    cfg.CodexModel,
+			FullAuto: cfg.CodexFullAuto,
+			Timeout:  cfg.AgentTimeout,
+			OutDir:   cfg.OutDir,
+		}
+	default:
+		return nil
 	}
 }
 
