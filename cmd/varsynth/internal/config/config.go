@@ -10,11 +10,12 @@ import (
 )
 
 type Config struct {
-	RepoPath    string
-	IssueFile   string
-	TestCommand string
-	OutDir      string
-	DryRun      bool
+	RepoPath          string
+	IssueFile         string
+	TestCommand       string
+	OutDir            string
+	DryRun            bool
+	PreserveWorktrees bool
 }
 
 // Parse converts CLI arguments into a validated config and normalizes path-like fields.
@@ -28,6 +29,7 @@ func Parse(args []string, stderr io.Writer) (Config, error) {
 	fs.StringVar(&cfg.TestCommand, "test-command", "", "Command used to validate candidate runs")
 	fs.StringVar(&cfg.OutDir, "out", "", "Directory for generated artifacts")
 	fs.BoolVar(&cfg.DryRun, "dry-run", false, "Execute the bootstrap pipeline without downstream actions")
+	fs.BoolVar(&cfg.PreserveWorktrees, "preserve-worktrees", false, "Keep candidate worktrees on disk after the run completes")
 
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err

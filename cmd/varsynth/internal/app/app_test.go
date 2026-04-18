@@ -10,6 +10,9 @@ import (
 	"testing"
 
 	ctxbundle "github.com/Slop-Happens/varsynth/cmd/varsynth/internal/context"
+	"github.com/Slop-Happens/varsynth/internal/candidate"
+	"github.com/Slop-Happens/varsynth/internal/lens"
+	reportpkg "github.com/Slop-Happens/varsynth/internal/report"
 )
 
 // TestRunCreatesContextBundle verifies the CLI pipeline emits a context artifact with mapped and unmapped frames.
@@ -100,6 +103,134 @@ func TestRunCreatesContextBundle(t *testing.T) {
 	if !strings.Contains(stdout.String(), "Dry run: downstream execution skipped") {
 		t.Fatalf("stdout missing dry-run message: %s", stdout.String())
 	}
+	if _, err := os.Stat(filepath.Join(outDir, "report.json")); !os.IsNotExist(err) {
+		t.Fatalf("report.json should not exist in dry-run mode: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "candidates")); !os.IsNotExist(err) {
+		t.Fatalf("candidates dir should not exist in dry-run mode: %v", err)
+	}
+}
+
+func TestRunExecutesCandidatePipeline(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	writeFile(t, filepath.Join(repoDir, "go.mod"), "module example.com/demo\n\ngo 1.25.8\n")
+	writeFile(t, filepath.Join(repoDir, "pkg", "buggy.go"), strings.Join([]string{
+		"package pkg",
+		"",
+		"func buggy() string {",
+		`	value := "broken"`,
+		"	return value",
+		"}",
+		"",
+	}, "\n"))
+
+	runGit(t, repoDir, "init")
+	runGit(t, repoDir, "config", "user.name", "Varsynth Test")
+	runGit(t, repoDir, "config", "user.email", "varsynth@example.com")
+	runGit(t, repoDir, "add", ".")
+	runGit(t, repoDir, "commit", "-m", "initial")
+
+	issuePath := filepath.Join(t.TempDir(), "issue.json")
+	writeFile(t, issuePath, `{
+  "id": "ISSUE-99",
+  "title": "Example panic",
+  "message": "panic: something bad happened",
+  "service": "varsynth",
+  "environment": "test",
+  "stack_frames": [
+    {
+      "file": "pkg/buggy.go",
+      "line": 4,
+      "function": "buggy"
+    }
+  ]
+}`)
+
+	outDir := filepath.Join(t.TempDir(), "artifacts")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	err := Run([]string{
+		"--repo", repoDir,
+		"--issue-file", issuePath,
+		"--test-command", "test -f go.mod",
+		"--out", outDir,
+		"--preserve-worktrees",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run() error = %v, stderr = %s", err, stderr.String())
+	}
+
+	contextPath := filepath.Join(outDir, "context.json")
+	contextPayload, err := os.ReadFile(contextPath)
+	if err != nil {
+		t.Fatalf("read context.json: %v", err)
+	}
+
+	var bundle ctxbundle.Bundle
+	if err := json.Unmarshal(contextPayload, &bundle); err != nil {
+		t.Fatalf("unmarshal context.json: %v", err)
+	}
+
+	t.Cleanup(func() {
+		worktreeRoot := filepath.Join(outDir, "worktrees")
+		for _, definition := range lens.All() {
+			path := filepath.Join(worktreeRoot, string(definition.ID))
+			if _, err := os.Stat(path); err == nil {
+				runGit(t, repoDir, "worktree", "remove", "--force", path)
+			}
+		}
+	})
+
+	for _, definition := range lens.All() {
+		path := candidate.Path(outDir, definition.ID)
+		payload, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read candidate artifact %s: %v", definition.ID, err)
+		}
+
+		var artifact candidate.Artifact
+		if err := json.Unmarshal(payload, &artifact); err != nil {
+			t.Fatalf("unmarshal candidate artifact %s: %v", definition.ID, err)
+		}
+		if artifact.Validation.Status != candidate.ValidationPassed {
+			t.Fatalf("%s validation status = %q, want %q", definition.ID, artifact.Validation.Status, candidate.ValidationPassed)
+		}
+		if !artifact.EmptyDiff {
+			t.Fatalf("%s EmptyDiff = false, want true for stub agent", definition.ID)
+		}
+		if strings.TrimSpace(runGitOutput(t, artifact.WorktreePath, "rev-parse", "HEAD")) != bundle.BaseCommit {
+			t.Fatalf("%s worktree HEAD does not match base commit", definition.ID)
+		}
+	}
+
+	reportPayload, err := os.ReadFile(reportpkg.Path(outDir))
+	if err != nil {
+		t.Fatalf("read report.json: %v", err)
+	}
+
+	var summary reportpkg.Summary
+	if err := json.Unmarshal(reportPayload, &summary); err != nil {
+		t.Fatalf("unmarshal report.json: %v", err)
+	}
+	if len(summary.Candidates) != len(lens.All()) {
+		t.Fatalf("report candidate count = %d, want %d", len(summary.Candidates), len(lens.All()))
+	}
+
+	if !strings.Contains(stdout.String(), "Candidate artifacts: 4") {
+		t.Fatalf("stdout missing candidate artifact count: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Validation: passed=4 failed=0 timed_out=0 not_run=0") {
+		t.Fatalf("stdout missing validation summary: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Report: "+reportpkg.Path(outDir)) {
+		t.Fatalf("stdout missing report path: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Worktrees: preserved at "+filepath.Join(outDir, "worktrees")) {
+		t.Fatalf("stdout missing worktree summary: %s", stdout.String())
+	}
 }
 
 // writeFile creates parent directories and writes fixture content for the test repo.
@@ -124,4 +255,16 @@ func runGit(t *testing.T, dir string, args ...string) {
 	if err != nil {
 		t.Fatalf("git %v failed: %v\n%s", args, err, string(out))
 	}
+}
+
+func runGitOutput(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, string(out))
+	}
+	return string(out)
 }
